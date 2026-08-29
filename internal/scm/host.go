@@ -402,11 +402,16 @@ func EvaluatePRReadiness(in ReadinessInput) ReadinessResult {
 		out.Reason = "proof review has not passed for the current head"
 		return out
 	}
+	decision := strings.ToUpper(strings.TrimSpace(in.ReviewDecision))
+	if decision == "" || (decision != "APPROVED" && decision != "CHANGES_REQUESTED") {
+		out.Reason = "review decision is unreadable or not an acceptable state"
+		return out
+	}
 	if len(in.UnresolvedIDs) > 0 {
 		out.Reason = "unresolved feedback remains"
 		return out
 	}
-	if in.Phase == ReadinessMerge && strings.EqualFold(strings.TrimSpace(in.ReviewDecision), "CHANGES_REQUESTED") {
+	if in.Phase == ReadinessMerge && decision != "APPROVED" {
 		out.Reason = "review decision is CHANGES_REQUESTED"
 		return out
 	}

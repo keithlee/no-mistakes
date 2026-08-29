@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS feedback_reconciliation (
     attempts INTEGER NOT NULL DEFAULT 0,
     validated_head TEXT,
     replied INTEGER NOT NULL DEFAULT 0,
+    repaired INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (run_id, item_id)
 );
@@ -173,8 +174,9 @@ CREATE TABLE IF NOT EXISTS feedback_reconciliation (
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
-	`CREATE TABLE IF NOT EXISTS feedback_reconciliation (run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, item_id TEXT NOT NULL, item_json TEXT, source_head TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, validated_head TEXT, replied INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (run_id, item_id))`,
+	`CREATE TABLE IF NOT EXISTS feedback_reconciliation (run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, item_id TEXT NOT NULL, item_json TEXT, source_head TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, validated_head TEXT, replied INTEGER NOT NULL DEFAULT 0, repaired INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (run_id, item_id))`,
 	`ALTER TABLE feedback_reconciliation ADD COLUMN item_json TEXT`,
+	`ALTER TABLE feedback_reconciliation ADD COLUMN repaired INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,

@@ -19,6 +19,7 @@ type Record struct {
 	Attempts      int
 	ValidatedHead string
 	Replied       bool
+	Repaired      bool
 }
 
 type Classification string
@@ -55,6 +56,7 @@ type Pending struct {
 	Attempts      int
 	ValidatedHead string
 	Replied       bool
+	Repaired      bool
 }
 
 type Result struct {
@@ -93,7 +95,7 @@ func (r *Reconciler) Records() []Record {
 	out := make([]Record, 0, len(ids))
 	for _, id := range ids {
 		p := r.pending[id]
-		out = append(out, Record{Item: p.Item, SourceHead: p.SourceHead, Attempts: p.Attempts, ValidatedHead: p.ValidatedHead, Replied: p.Replied})
+		out = append(out, Record{Item: p.Item, SourceHead: p.SourceHead, Attempts: p.Attempts, ValidatedHead: p.ValidatedHead, Replied: p.Replied, Repaired: p.Repaired})
 	}
 	return out
 }
@@ -103,7 +105,7 @@ func (r *Reconciler) Restore(records []Record) {
 		if strings.TrimSpace(record.Item.ID) == "" {
 			continue
 		}
-		r.pending[record.Item.ID] = Pending{Item: record.Item, SourceHead: record.SourceHead, Attempts: record.Attempts, ValidatedHead: record.ValidatedHead, Replied: record.Replied}
+		r.pending[record.Item.ID] = Pending{Item: record.Item, SourceHead: record.SourceHead, Attempts: record.Attempts, ValidatedHead: record.ValidatedHead, Replied: record.Replied, Repaired: record.Repaired}
 	}
 }
 
@@ -185,6 +187,7 @@ func (r *Reconciler) RepairedHead(itemID, head string) bool {
 		return false
 	}
 	p.SourceHead, p.ValidatedHead = head, ""
+	p.Repaired = true
 	r.pending[itemID] = p
 	return true
 }
@@ -205,7 +208,7 @@ func (r *Reconciler) ValidationPassed(head string, ci, proofReview bool) []Resul
 	sort.Strings(ids)
 	for _, id := range ids {
 		p := r.pending[id]
-		if p.SourceHead != head {
+		if p.SourceHead != head || !p.Repaired {
 			continue
 		}
 		if p.Replied {

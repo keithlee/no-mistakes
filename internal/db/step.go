@@ -77,7 +77,7 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 // GetStepsByRun returns all step results for a run, in execution order.
 func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 	rows, err := d.sql.Query(
-		`SELECT `+d.readableStepResultColumns()+` FROM step_results WHERE run_id = ? ORDER BY step_order`, runID,
+		`SELECT `+d.readableStepResultColumns()+` FROM step_results WHERE run_id = ? ORDER BY CASE step_name WHEN 'intent' THEN 1 WHEN 'rebase' THEN 2 WHEN 'review' THEN 3 WHEN 'test' THEN 4 WHEN 'proof' THEN 5 WHEN 'proof-review' THEN 6 WHEN 'document' THEN 7 WHEN 'lint' THEN 8 WHEN 'push' THEN 9 WHEN 'pr' THEN 10 WHEN 'ci' THEN 11 ELSE step_order END, step_order, id`, runID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get steps by run: %w", err)

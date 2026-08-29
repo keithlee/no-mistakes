@@ -110,19 +110,19 @@ func (s StepName) Order() int {
 	case StepTest:
 		return 4
 	case StepProof:
-		return 10
-	case StepProofReview:
-		return 11
-	case StepDocument:
 		return 5
-	case StepLint:
+	case StepProofReview:
 		return 6
-	case StepPush:
+	case StepDocument:
 		return 7
-	case StepPR:
+	case StepLint:
 		return 8
-	case StepCI:
+	case StepPush:
 		return 9
+	case StepPR:
+		return 10
+	case StepCI:
+		return 11
 	default:
 		return 0
 	}

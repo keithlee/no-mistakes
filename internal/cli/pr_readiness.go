@@ -68,6 +68,11 @@ func runAxiPRReadiness(cmd *cobra.Command, prURL, expectedHead, phase string) er
 		result.Reason = err.Error()
 		return emitReadiness(cmd, prURL, readinessPhase, result)
 	}
+	if strings.TrimSpace(snapshot.PRAuthor) == "" || strings.TrimSpace(snapshot.HeadSHA) == "" {
+		result := scm.EvaluatePRReadiness(scm.ReadinessInput{Phase: readinessPhase, ExpectedHead: expectedHead, CurrentHead: snapshot.HeadSHA, ProviderSupported: true, StateReadable: false})
+		result.Reason = "GitHub feedback state omitted pull-request author or head"
+		return emitReadiness(cmd, prURL, readinessPhase, result)
+	}
 	checks, err := host.GetChecks(cmd.Context(), pr)
 	if err != nil {
 		result := scm.EvaluatePRReadiness(scm.ReadinessInput{Phase: readinessPhase, ExpectedHead: expectedHead, ProviderSupported: true, StateReadable: false})

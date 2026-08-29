@@ -30,6 +30,10 @@ func TestReconcilerNeverRepliesBeforeValidationAndResolvesAfterReply(t *testing.
 	if got := r.ValidationPassed("abc", false, true); got != nil {
 		t.Fatalf("replied before CI: %+v", got)
 	}
+	if got := r.ValidationPassed("abc", true, true); got != nil {
+		t.Fatalf("replied before repair: %+v", got)
+	}
+	r.RepairedHead("c1", "abc")
 	actions := r.ValidationPassed("abc", true, true)
 	if len(actions) != 1 || actions[0].Action != Reply {
 		t.Fatalf("validation actions = %+v", actions)

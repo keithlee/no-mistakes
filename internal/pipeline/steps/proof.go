@@ -159,6 +159,40 @@ func decodeProofFindings(result *agent.Result) (Findings, error) {
 	if err := json.Unmarshal(result.Output, &findings); err != nil {
 		return Findings{}, err
 	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(result.Output, &wire); err != nil {
+		return Findings{}, err
+	}
+	var summary string
+	if raw, ok := wire["summary"]; !ok || json.Unmarshal(raw, &summary) != nil || strings.TrimSpace(summary) == "" {
+		return Findings{}, fmt.Errorf("summary is required")
+	}
+	if raw, ok := wire["findings"]; !ok || string(raw) == "null" {
+		return Findings{}, fmt.Errorf("findings array is required")
+	}
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(wire["findings"], &rawItems); err != nil {
+		return Findings{}, fmt.Errorf("findings must be an array: %w", err)
+	}
+	for i, raw := range rawItems {
+		var item Finding
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return Findings{}, fmt.Errorf("finding %d: %w", i, err)
+		}
+		if strings.TrimSpace(item.Description) == "" {
+			return Findings{}, fmt.Errorf("finding %d description is required", i)
+		}
+		switch item.Severity {
+		case "error", "warning", "info":
+		default:
+			return Findings{}, fmt.Errorf("finding %d has invalid severity", i)
+		}
+		switch item.Action {
+		case types.ActionAutoFix, types.ActionAskUser, "no-op":
+		default:
+			return Findings{}, fmt.Errorf("finding %d has invalid action", i)
+		}
+	}
 	return findings, nil
 }
 
