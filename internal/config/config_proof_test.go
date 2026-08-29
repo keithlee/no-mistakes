@@ -33,3 +33,26 @@ func TestProofGuidanceRejectsRelativeAndOversizedConfiguration(t *testing.T) {
 		t.Fatal("oversized proof guidance accepted")
 	}
 }
+
+func TestFeedbackPolicyDefaultsToStrictAllBotsAndIsGloballyConfigurable(t *testing.T) {
+	defaults, err := LoadGlobalFromBytes([]byte("{}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Feedback.IncludeBots == nil || !*defaults.Feedback.IncludeBots || len(defaults.Feedback.BotAuthorPatterns) != 1 || defaults.Feedback.BotAuthorPatterns[0] != "*" {
+		t.Fatalf("default feedback policy = %#v", defaults.Feedback)
+	}
+	configured, err := LoadGlobalFromBytes([]byte("feedback:\n  include_bots: false\n  bot_author_patterns: [greptile*]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.Feedback.IncludeBots == nil || *configured.Feedback.IncludeBots || configured.Feedback.BotAuthorPatterns[0] != "greptile*" {
+		t.Fatalf("configured feedback policy = %#v", configured.Feedback)
+	}
+}
+
+func TestFeedbackPolicyRejectsInvalidPattern(t *testing.T) {
+	if _, err := LoadGlobalFromBytes([]byte("feedback:\n  bot_author_patterns: ['[']\n")); err == nil {
+		t.Fatal("invalid feedback author pattern accepted")
+	}
+}

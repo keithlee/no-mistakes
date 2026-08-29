@@ -160,11 +160,12 @@ type GlobalConfig struct {
 	// budget can be set for a repository whose default branch this machine's
 	// user does not control (the common case when contributing to someone
 	// else's project), and a trusted repo value still wins over it.
-	CI     CIRaw
-	Commit CommitRaw
-	Intent IntentRaw
-	Test   TestRaw
-	Proof  ProofRaw
+	CI       CIRaw
+	Commit   CommitRaw
+	Intent   IntentRaw
+	Test     TestRaw
+	Proof    ProofRaw
+	Feedback FeedbackRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -198,6 +199,7 @@ type globalConfigRaw struct {
 	Intent                  IntentRaw                  `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
 	Proof                   ProofRaw                   `yaml:"proof"`
+	Feedback                FeedbackRaw                `yaml:"feedback"`
 	Eval                    EvalRaw                    `yaml:"eval"`
 	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
 }
@@ -279,6 +281,19 @@ type RepoConfig struct {
 // guidance used to judge its own proof.
 type ProofRaw struct {
 	GuidanceFiles []string `yaml:"guidance_files"`
+}
+
+// FeedbackRaw is operator-controlled provider feedback policy. Bot authors
+// are data, not authority; patterns only decide which bot-authored items are
+// eligible for reconciliation.
+type FeedbackRaw struct {
+	IncludeBots       *bool    `yaml:"include_bots"`
+	BotAuthorPatterns []string `yaml:"bot_author_patterns"`
+}
+
+type Feedback struct {
+	IncludeBots       bool
+	BotAuthorPatterns []string
 }
 
 // DocumentRaw is the YAML representation of document-step settings.
@@ -561,6 +576,7 @@ type Config struct {
 	Intent                Intent
 	Test                  Test
 	Proof                 Proof
+	Feedback              Feedback
 	Document              Document
 	Review                Review
 	PR                    PR
@@ -1646,9 +1662,12 @@ func DefaultGlobalConfig() *GlobalConfig {
 		BranchSyncRemoteTimeout: DefaultBranchSyncRemoteTimeout,
 		LogLevel:                "info",
 		SessionReuse:            true,
+		Feedback:                FeedbackRaw{IncludeBots: boolPtr(true), BotAuthorPatterns: []string{"*"}},
 		Eval:                    evalDefaults(),
 	}
 }
+
+func boolPtr(value bool) *bool { return &value }
 
 // GlobalConfigMappingEntry is one entry of a top-level mapping, spelled the way
 // the document spells it.
@@ -1819,6 +1838,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateProofRaw(raw.Proof); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateFeedbackRaw(raw.Feedback); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -1932,6 +1954,12 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
 	cfg.Proof = raw.Proof
+	if raw.Feedback.IncludeBots != nil {
+		cfg.Feedback.IncludeBots = raw.Feedback.IncludeBots
+	}
+	if raw.Feedback.BotAuthorPatterns != nil {
+		cfg.Feedback.BotAuthorPatterns = append([]string(nil), raw.Feedback.BotAuthorPatterns...)
+	}
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
 
 	return cfg, nil
@@ -1957,6 +1985,22 @@ func validateProofRaw(proof ProofRaw) error {
 			return fmt.Errorf("proof.guidance_files[%d] duplicates %q", i, file)
 		}
 		seen[file] = struct{}{}
+	}
+	return nil
+}
+
+func validateFeedbackRaw(feedback FeedbackRaw) error {
+	if len(feedback.BotAuthorPatterns) > 32 {
+		return fmt.Errorf("feedback.bot_author_patterns has %d entries, maximum is 32", len(feedback.BotAuthorPatterns))
+	}
+	for i, pattern := range feedback.BotAuthorPatterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			return fmt.Errorf("feedback.bot_author_patterns[%d] must not be empty", i)
+		}
+		if _, err := path.Match(pattern, "probe[bot]"); err != nil {
+			return fmt.Errorf("feedback.bot_author_patterns[%d] is invalid: %w", i, err)
+		}
 	}
 	return nil
 }
@@ -2629,6 +2673,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:         intent,
 		Test:           test,
 		Proof:          Proof{GuidanceFiles: append([]string(nil), global.Proof.GuidanceFiles...)},
+		Feedback:       Feedback{IncludeBots: global.Feedback.IncludeBots != nil && *global.Feedback.IncludeBots, BotAuthorPatterns: append([]string(nil), global.Feedback.BotAuthorPatterns...)},
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
 		PR:             PR{BaseBranch: strings.TrimSpace(repo.PR.BaseBranch)},

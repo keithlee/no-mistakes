@@ -8,6 +8,8 @@ import (
 
 	toon "github.com/toon-format/toon-go"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -80,6 +82,14 @@ func runAxiPRReadiness(cmd *cobra.Command, prURL, expectedHead, phase string) er
 		}
 	}
 	policy := scm.FeedbackPolicy{PRAuthor: snapshot.PRAuthor, IncludeBots: true, BotAuthorPatterns: []string{"*"}}
+	if p, pathErr := paths.New(); pathErr == nil {
+		if global, configErr := config.LoadGlobal(p.ConfigFile()); configErr == nil {
+			policy.IncludeBots = global.Feedback.IncludeBots == nil || *global.Feedback.IncludeBots
+			if len(global.Feedback.BotAuthorPatterns) > 0 {
+				policy.BotAuthorPatterns = append([]string(nil), global.Feedback.BotAuthorPatterns...)
+			}
+		}
+	}
 	var unresolvedIDs, unresolvedURLs []string
 	for _, item := range snapshot.Items {
 		if item.Resolved || !policy.InScope(item) || markerAddresses(item, snapshot.HeadSHA) {
