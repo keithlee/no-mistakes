@@ -1303,7 +1303,9 @@ func isSupportedReviewBot(login string) bool {
 	}
 }
 
-const feedbackSnapshotQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid author{login} reviewDecision reviews(first:100){nodes{databaseId body state submittedAt author{login}}} reviewThreads(first:100,after:$cursor){nodes{id isResolved comments(first:100){nodes{databaseId body path line url createdAt author{login}}}} pageInfo{hasNextPage endCursor}}}}}}`
+const feedbackSnapshotQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String,$reviewCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid author{login} reviewDecision reviews(first:100,after:$reviewCursor){nodes{databaseId body state submittedAt author{login}} pageInfo{hasNextPage endCursor}} reviewThreads(first:100,after:$cursor){nodes{id isResolved comments(first:100){nodes{databaseId body path line url createdAt author{login}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}`
+
+const feedbackThreadCommentsQuery = `query($threadId:ID!,$cursor:String){node(id:$threadId){... on PullRequestReviewThread{comments(first:100,after:$cursor){nodes{databaseId body path line url createdAt author{login}} pageInfo{hasNextPage endCursor}}}}}`
 
 // GetFeedback implements scm.FeedbackHost. It deliberately fetches every
 // provider surface used by readiness: submitted reviews, inline review
@@ -1336,10 +1338,14 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 
 	var snapshot scm.FeedbackSnapshot
 	cursor := ""
+	reviewCursor := ""
 	for {
 		args := []string{"api", "graphql", "-f", "query=" + feedbackSnapshotQuery, "-F", "owner=" + parts[0], "-F", "name=" + parts[1], "-F", "number=" + strconv.Itoa(prNumber)}
 		if cursor != "" {
 			args = append(args, "-F", "cursor="+cursor)
+		}
+		if reviewCursor != "" {
+			args = append(args, "-F", "reviewCursor="+reviewCursor)
 		}
 		if h.host != "" {
 			args = append([]string{"api", "--hostname", h.host, "graphql"}, args[2:]...)
@@ -1367,6 +1373,10 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 									Login string `json:"login"`
 								} `json:"author"`
 							} `json:"nodes"`
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
 						} `json:"reviews"`
 						ReviewThreads struct {
 							Nodes []struct {
@@ -1384,6 +1394,10 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 											Login string `json:"login"`
 										} `json:"author"`
 									} `json:"nodes"`
+									PageInfo struct {
+										HasNextPage bool   `json:"hasNextPage"`
+										EndCursor   string `json:"endCursor"`
+									} `json:"pageInfo"`
 								} `json:"comments"`
 							} `json:"nodes"`
 							PageInfo struct {
@@ -1413,15 +1427,18 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 			if pull.Author != nil {
 				snapshot.PRAuthor = pull.Author.Login
 			}
-			for _, review := range pull.Reviews.Nodes {
-				if review.Author == nil || strings.TrimSpace(review.State) == "PENDING" {
-					continue
-				}
-				snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(review.ID, 10), Kind: scm.FeedbackReview, ReviewState: review.State, Author: review.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(review.Author.Login), "[bot]"), Body: review.Body, CreatedAt: review.SubmittedAt})
+		}
+		for _, review := range pull.Reviews.Nodes {
+			if review.Author == nil || strings.TrimSpace(review.State) == "PENDING" {
+				continue
 			}
+			snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(review.ID, 10), Kind: scm.FeedbackReview, ReviewState: review.State, Author: review.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(review.Author.Login), "[bot]"), Body: review.Body, CreatedAt: review.SubmittedAt})
 		}
 		for _, thread := range pull.ReviewThreads.Nodes {
-			for _, comment := range thread.Comments.Nodes {
+			comments := thread.Comments.Nodes
+			commentCursor := thread.Comments.PageInfo.EndCursor
+			commentsHasNext := thread.Comments.PageInfo.HasNextPage
+			for _, comment := range comments {
 				if comment.Author == nil {
 					continue
 				}
@@ -1431,15 +1448,44 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 				}
 				snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(comment.ID, 10), ThreadID: thread.ID, Kind: scm.FeedbackInlineReview, URL: comment.URL, Author: comment.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(comment.Author.Login), "[bot]"), Body: comment.Body, Path: comment.Path, Line: line, CreatedAt: comment.CreatedAt, Resolved: thread.IsResolved})
 			}
+			for commentsHasNext {
+				if commentCursor == "" {
+					return scm.FeedbackSnapshot{}, errors.New("GitHub feedback response returned an invalid nested comment cursor")
+				}
+				more, next, hasNext, fetchErr := h.getFeedbackThreadComments(ctx, thread.ID, commentCursor)
+				if fetchErr != nil {
+					return scm.FeedbackSnapshot{}, fetchErr
+				}
+				for _, comment := range more {
+					if comment.Author == nil {
+						continue
+					}
+					line := 0
+					if comment.Line != nil {
+						line = *comment.Line
+					}
+					snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(comment.ID, 10), ThreadID: thread.ID, Kind: scm.FeedbackInlineReview, URL: comment.URL, Author: comment.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(comment.Author.Login), "[bot]"), Body: comment.Body, Path: comment.Path, Line: line, CreatedAt: comment.CreatedAt, Resolved: thread.IsResolved})
+				}
+				commentsHasNext = hasNext
+				commentCursor = next
+			}
+		}
+		if pull.Reviews.PageInfo.HasNextPage {
+			if pull.Reviews.PageInfo.EndCursor == "" || pull.Reviews.PageInfo.EndCursor == reviewCursor {
+				return scm.FeedbackSnapshot{}, errors.New("GitHub feedback response returned an invalid review cursor")
+			}
+			reviewCursor = pull.Reviews.PageInfo.EndCursor
 		}
 		pageInfo := pull.ReviewThreads.PageInfo
-		if !pageInfo.HasNextPage {
+		if !pageInfo.HasNextPage && !pull.Reviews.PageInfo.HasNextPage {
 			break
 		}
-		if pageInfo.EndCursor == "" || pageInfo.EndCursor == cursor {
-			return scm.FeedbackSnapshot{}, errors.New("GitHub feedback response returned an invalid review-thread page cursor")
+		if pageInfo.HasNextPage {
+			if pageInfo.EndCursor == "" || pageInfo.EndCursor == cursor {
+				return scm.FeedbackSnapshot{}, errors.New("GitHub feedback response returned an invalid review-thread page cursor")
+			}
+			cursor = pageInfo.EndCursor
 		}
-		cursor = pageInfo.EndCursor
 	}
 	issueItems, err := h.getIssueFeedback(ctx, repo, number)
 	if err != nil {
@@ -1447,6 +1493,64 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 	}
 	snapshot.Items = append(snapshot.Items, issueItems...)
 	return snapshot, nil
+}
+
+func (h *Host) getFeedbackThreadComments(ctx context.Context, threadID, cursor string) ([]struct {
+	ID        int64     `json:"databaseId"`
+	Body      string    `json:"body"`
+	Path      string    `json:"path"`
+	URL       string    `json:"url"`
+	Line      *int      `json:"line"`
+	CreatedAt time.Time `json:"createdAt"`
+	Author    *struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}, string, bool, error) {
+	args := []string{"api"}
+	if h.host != "" {
+		args = append(args, "--hostname", h.host)
+	}
+	args = append(args, "graphql", "-f", "query="+feedbackThreadCommentsQuery, "-F", "threadId="+threadID, "-F", "cursor="+cursor)
+	out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+	if err != nil {
+		return nil, "", false, fmt.Errorf("gh api nested PR comments: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	var response struct {
+		Data struct {
+			Node *struct {
+				Comments struct {
+					Nodes []struct {
+						ID        int64     `json:"databaseId"`
+						Body      string    `json:"body"`
+						Path      string    `json:"path"`
+						URL       string    `json:"url"`
+						Line      *int      `json:"line"`
+						CreatedAt time.Time `json:"createdAt"`
+						Author    *struct {
+							Login string `json:"login"`
+						} `json:"author"`
+					} `json:"nodes"`
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+				} `json:"comments"`
+			} `json:"node"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return nil, "", false, fmt.Errorf("decode nested PR comments: %w", err)
+	}
+	if len(response.Errors) > 0 {
+		return nil, "", false, errors.New(response.Errors[0].Message)
+	}
+	if response.Data.Node == nil {
+		return nil, "", false, errors.New("nested PR comments response omitted thread")
+	}
+	return response.Data.Node.Comments.Nodes, response.Data.Node.Comments.PageInfo.EndCursor, response.Data.Node.Comments.PageInfo.HasNextPage, nil
 }
 
 type githubIssueComment struct {

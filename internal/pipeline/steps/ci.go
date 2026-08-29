@@ -53,6 +53,7 @@ type CIStep struct {
 	feedbackReconciler *feedback.Reconciler
 	feedbackDecisions  map[string]feedback.Decision
 	feedbackPrompt     string
+	feedbackLoaded     bool
 }
 
 func (s *CIStep) Name() types.StepName { return types.StepCI }

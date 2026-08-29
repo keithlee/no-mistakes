@@ -32,9 +32,9 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
 )
 
-// StepFactory creates pipeline steps for a run. Defaults to the proof-aware
-// sequence when operator proof guidance is configured, and otherwise retains
-// the legacy sequence for existing installations and replay fixtures.
+// StepFactory creates pipeline steps for a run. The default is always the
+// proof-aware sequence: Proof and ProofReview are mandatory gates. Operators
+// may only configure the guidance content; they cannot disable these gates.
 type StepFactory func() []pipeline.Step
 
 var recoveredConfigFetchTimeout = 10 * time.Second
@@ -82,12 +82,7 @@ const maxSubscribersPerRun = 32
 // NewRunManager creates a RunManager. Pass nil for stepFactory to use default steps.
 func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *RunManager {
 	if stepFactory == nil {
-		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
-		if p != nil {
-			if global, err := config.LoadGlobal(p.ConfigFile()); err == nil && len(global.Proof.GuidanceFiles) > 0 {
-				stepFactory = func() []pipeline.Step { return steps.AllStepsWithProof() }
-			}
-		}
+		stepFactory = func() []pipeline.Step { return steps.AllStepsWithProof() }
 	}
 	return &RunManager{
 		executors:     make(map[string]*pipeline.Executor),

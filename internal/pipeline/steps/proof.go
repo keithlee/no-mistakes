@@ -27,11 +27,15 @@ func (s *ProofStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 	if sctx == nil || sctx.Run == nil {
 		return nil, fmt.Errorf("proof requires a run")
 	}
-	guidance, err := proofpkg.SnapshotGuidance(proofGuidanceFiles(sctx))
+	guidanceFiles := proofGuidanceFiles(sctx)
+	if len(guidanceFiles) == 0 {
+		return proofFinding("proof.guidance_files is missing; operator proof guidance is required", types.ActionAskUser), nil
+	}
+	guidance, err := proofpkg.SnapshotGuidance(guidanceFiles)
 	if err != nil {
 		return proofFinding("proof guidance unavailable: "+err.Error(), types.ActionAskUser), nil
 	}
-	files, err := proofArtifacts(sctx.EvidenceDir)
+	files, err := proofArtifacts(sctx.EvidenceDir, sctx.Run.CreatedAt)
 	if err != nil {
 		return proofFinding("proof artifacts unavailable: "+err.Error(), types.ActionAutoFix), nil
 	}
@@ -56,9 +60,9 @@ Artifacts:
 	if err != nil {
 		return nil, fmt.Errorf("agent proof: %w", err)
 	}
-	findings := Findings{}
-	if err := json.Unmarshal(result.Output, &findings); err != nil {
-		findings.Summary = result.Text
+	findings, decodeErr := decodeProofFindings(result)
+	if decodeErr != nil {
+		return proofFinding("proof agent returned malformed findings JSON: "+decodeErr.Error(), types.ActionAskUser), nil
 	}
 	if findings.Summary == "" {
 		findings.Summary = "proof artifacts reviewed"
@@ -81,7 +85,13 @@ func (s *ProofReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOut
 	if sctx == nil || sctx.Run == nil {
 		return nil, fmt.Errorf("proof review requires a run")
 	}
-	files, err := proofArtifacts(sctx.EvidenceDir)
+	if len(proofGuidanceFiles(sctx)) == 0 {
+		return proofFinding("proof.guidance_files is missing; independent proof review is blocked", types.ActionAskUser), nil
+	}
+	if _, err := proofpkg.SnapshotGuidance(proofGuidanceFiles(sctx)); err != nil {
+		return proofFinding("proof guidance unavailable: "+err.Error(), types.ActionAskUser), nil
+	}
+	files, err := proofArtifacts(sctx.EvidenceDir, sctx.Run.CreatedAt)
 	if err != nil {
 		return proofFinding("proof review cannot read artifacts: "+err.Error(), types.ActionAskUser), nil
 	}
@@ -96,9 +106,9 @@ Artifacts:
 	if err != nil {
 		return nil, fmt.Errorf("agent proof review: %w", err)
 	}
-	findings := Findings{}
-	if err := json.Unmarshal(result.Output, &findings); err != nil {
-		findings.Summary = result.Text
+	findings, decodeErr := decodeProofFindings(result)
+	if decodeErr != nil {
+		return proofFinding("proof review returned malformed findings JSON: "+decodeErr.Error(), types.ActionAskUser), nil
 	}
 	if findings.Summary == "" {
 		findings.Summary = "proof independently accepted"
@@ -114,7 +124,7 @@ func proofGuidanceFiles(sctx *pipeline.StepContext) []string {
 	return sctx.Config.Proof.GuidanceFiles
 }
 
-func proofArtifacts(dir string) ([]string, error) {
+func proofArtifacts(dir string, runCreatedAt int64) ([]string, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, fmt.Errorf("evidence directory is not configured")
 	}
@@ -131,11 +141,25 @@ func proofArtifacts(dir string) ([]string, error) {
 			return err
 		}
 		if info.Mode().IsRegular() {
+			if runCreatedAt > 0 && info.ModTime().Unix() < runCreatedAt {
+				return fmt.Errorf("proof artifact %q is stale (modified %d before run %d)", path, info.ModTime().Unix(), runCreatedAt)
+			}
 			files = append(files, path)
 		}
 		return nil
 	})
 	return files, err
+}
+
+func decodeProofFindings(result *agent.Result) (Findings, error) {
+	if result == nil || len(result.Output) == 0 {
+		return Findings{}, fmt.Errorf("empty output")
+	}
+	var findings Findings
+	if err := json.Unmarshal(result.Output, &findings); err != nil {
+		return Findings{}, err
+	}
+	return findings, nil
 }
 
 func renderGuidance(files []proofpkg.GuidanceSnapshot) string {

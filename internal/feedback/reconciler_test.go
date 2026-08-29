@@ -56,3 +56,14 @@ func TestReconcilerRetriesAndRejectsStaleHead(t *testing.T) {
 		t.Fatalf("exhausted = %+v", got)
 	}
 }
+
+func TestReconcilerHonorsValidatedAuthorMarkerWithoutRequeue(t *testing.T) {
+	r := New(1)
+	item := scm.FeedbackItem{ID: "c1", Kind: scm.FeedbackIssueComment, Author: "reviewer"}
+	marker := scm.FeedbackItem{ID: "reply", Kind: scm.FeedbackIssueComment, Author: "author", Body: scm.FeedbackDispositionMarker("c1", "abc", "fixed")}
+	snapshot := scm.FeedbackSnapshot{HeadSHA: "abc", PRAuthor: "author", Items: []scm.FeedbackItem{item, marker}}
+	got := r.Observe(snapshot, scm.FeedbackPolicy{PRAuthor: "author"}, "abc", nil)
+	if got.Action != NoAction {
+		t.Fatalf("marker-dispositioned item was requeued: %+v", got)
+	}
+}

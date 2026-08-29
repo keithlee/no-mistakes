@@ -155,12 +155,26 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
     created_at    INTEGER NOT NULL,
     PRIMARY KEY (repo_id, branch)
 );
+
+CREATE TABLE IF NOT EXISTS feedback_reconciliation (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    item_id TEXT NOT NULL,
+    item_json TEXT,
+    source_head TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    validated_head TEXT,
+    replied INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, item_id)
+);
 `
 
 // migrationStatements hold additive schema changes applied to databases that
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
+	`CREATE TABLE IF NOT EXISTS feedback_reconciliation (run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, item_id TEXT NOT NULL, item_json TEXT, source_head TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, validated_head TEXT, replied INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (run_id, item_id))`,
+	`ALTER TABLE feedback_reconciliation ADD COLUMN item_json TEXT`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,

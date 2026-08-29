@@ -5,12 +5,21 @@
 package feedback
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
+
+type Record struct {
+	Item          scm.FeedbackItem
+	SourceHead    string
+	Attempts      int
+	ValidatedHead string
+	Replied       bool
+}
 
 type Classification string
 
@@ -75,6 +84,36 @@ func (r *Reconciler) Pending() map[string]Pending {
 	return out
 }
 
+func (r *Reconciler) Records() []Record {
+	ids := make([]string, 0, len(r.pending))
+	for id := range r.pending {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]Record, 0, len(ids))
+	for _, id := range ids {
+		p := r.pending[id]
+		out = append(out, Record{Item: p.Item, SourceHead: p.SourceHead, Attempts: p.Attempts, ValidatedHead: p.ValidatedHead, Replied: p.Replied})
+	}
+	return out
+}
+
+func (r *Reconciler) Restore(records []Record) {
+	for _, record := range records {
+		if strings.TrimSpace(record.Item.ID) == "" {
+			continue
+		}
+		r.pending[record.Item.ID] = Pending{Item: record.Item, SourceHead: record.SourceHead, Attempts: record.Attempts, ValidatedHead: record.ValidatedHead, Replied: record.Replied}
+	}
+}
+
+func MarshalItem(item scm.FeedbackItem) string { b, _ := json.Marshal(item); return string(b) }
+func UnmarshalItem(raw string) (scm.FeedbackItem, error) {
+	var item scm.FeedbackItem
+	err := json.Unmarshal([]byte(raw), &item)
+	return item, err
+}
+
 // Observe returns exactly one next action. New feedback revokes readiness;
 // already pending feedback is not repeatedly sent to an agent while waiting
 // for the restarted review/test/proof/proof-review gates.
@@ -82,8 +121,21 @@ func (r *Reconciler) Observe(snapshot scm.FeedbackSnapshot, policy scm.FeedbackP
 	if strings.TrimSpace(expectedHead) == "" || !strings.EqualFold(strings.TrimSpace(expectedHead), strings.TrimSpace(snapshot.HeadSHA)) {
 		return Result{Action: Blocked, Reason: "feedback snapshot head is stale or unreadable"}
 	}
+	dispositioned := make(map[string]bool)
+	for _, candidate := range snapshot.Items {
+		if !strings.EqualFold(strings.TrimSpace(candidate.Author), strings.TrimSpace(policy.PRAuthor)) {
+			continue
+		}
+		id, markerHead, disposition, ok := scm.ParseFeedbackDispositionMarker(candidate.Body)
+		if ok && strings.EqualFold(markerHead, snapshot.HeadSHA) && strings.TrimSpace(disposition) != "" {
+			dispositioned[id] = true
+		}
+	}
 	for _, item := range snapshot.Items {
 		if item.Resolved || !policy.InScope(item) {
+			continue
+		}
+		if dispositioned[item.ID] {
 			continue
 		}
 		pending, exists := r.pending[item.ID]

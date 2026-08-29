@@ -22,4 +22,3 @@ func TestAllStepsWithProofPlacesIndependentGatesBeforeDocument(t *testing.T) {
 		}
 	}
 }
-
