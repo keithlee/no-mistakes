@@ -115,14 +115,21 @@ func TestRebindPipelineAttestationHead_VerifyPyRoundTrip(t *testing.T) {
 
 type attestationTestHost struct {
 	scm.Host
-	title       string
-	body        string
-	updated     scm.PRContent
-	updates     int
-	failUpdates int
+	title                   string
+	body                    string
+	updated                 scm.PRContent
+	updates                 int
+	failUpdates             int
+	reads                   int
+	contentBeforeSecondRead *scm.PRContent
 }
 
 func (h *attestationTestHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
+	h.reads++
+	if h.reads == 2 && h.contentBeforeSecondRead != nil {
+		h.title = h.contentBeforeSecondRead.Title
+		h.body = h.contentBeforeSecondRead.Body
+	}
 	return scm.PRContent{Title: h.title, Body: h.body}, nil
 }
 
@@ -193,6 +200,35 @@ func TestRestampPRAttestation_RebindsExistingAndSkipsMissing(t *testing.T) {
 			t.Fatalf("a PR not raised through no-mistakes must still fail, got %s\n%s", got, out)
 		}
 	})
+}
+
+func TestRestampPRAttestation_PreservesContentEditedWhilePreparingRewrite(t *testing.T) {
+	t.Parallel()
+	originalHead := testPipelineHeadSHA
+	repairHead := strings.Repeat("34", 20)
+	body := compliantPipelineBody(t, originalHead)
+	concurrent := scm.PRContent{
+		Title: "title edited by the user",
+		Body:  body + "\n\nUser edit made during settlement.",
+	}
+	host := &attestationTestHost{
+		title:                   "stale title",
+		body:                    body,
+		contentBeforeSecondRead: &concurrent,
+	}
+
+	if err := restampPRAttestation(context.Background(), host, &scm.PR{Number: "42"}, repairHead, nil); err != nil {
+		t.Fatal(err)
+	}
+	if host.updated.Title != concurrent.Title {
+		t.Fatalf("updated title = %q, want concurrent title %q", host.updated.Title, concurrent.Title)
+	}
+	if !strings.Contains(host.updated.Body, "User edit made during settlement.") {
+		t.Fatalf("updated body lost concurrent user edit:\n%s", host.updated.Body)
+	}
+	if got := parsePipelineAttestationForTest(t, host.updated.Body).HeadSHA; got != repairHead {
+		t.Fatalf("updated attestation head = %q, want %q", got, repairHead)
+	}
 }
 
 func TestRestampPRAttestation_RetriesAndRequiresSettlement(t *testing.T) {

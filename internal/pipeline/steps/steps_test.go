@@ -430,6 +430,17 @@ func fakeGHHandlePRContentCommands(args []string, joined string) {
 			fmt.Fprintln(os.Stderr, editErr)
 			os.Exit(1)
 		}
+		if path := os.Getenv("FAKE_CLI_PR_BODY_FILE"); path != "" {
+			body, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			if err := os.WriteFile(path, body, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
 		os.Exit(0)
 	}
 }
