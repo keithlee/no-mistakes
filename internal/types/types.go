@@ -49,15 +49,17 @@ func (s RunStatus) Terminal() bool {
 type StepName string
 
 const (
-	StepIntent   StepName = "intent"
-	StepRebase   StepName = "rebase"
-	StepReview   StepName = "review"
-	StepTest     StepName = "test"
-	StepDocument StepName = "document"
-	StepLint     StepName = "lint"
-	StepPush     StepName = "push"
-	StepPR       StepName = "pr"
-	StepCI       StepName = "ci"
+	StepIntent      StepName = "intent"
+	StepRebase      StepName = "rebase"
+	StepReview      StepName = "review"
+	StepTest        StepName = "test"
+	StepProof       StepName = "proof"
+	StepProofReview StepName = "proof-review"
+	StepDocument    StepName = "document"
+	StepLint        StepName = "lint"
+	StepPush        StepName = "push"
+	StepPR          StepName = "pr"
+	StepCI          StepName = "ci"
 )
 
 func normalizeStepName(s StepName) StepName {
@@ -107,6 +109,10 @@ func (s StepName) Order() int {
 		return 3
 	case StepTest:
 		return 4
+	case StepProof:
+		return 10
+	case StepProofReview:
+		return 11
 	case StepDocument:
 		return 5
 	case StepLint:
@@ -125,6 +131,13 @@ func (s StepName) Order() int {
 // AllSteps returns all pipeline steps in execution order.
 func AllSteps() []StepName {
 	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
+}
+
+// AllStepsWithProof returns the complete proof-aware pipeline sequence. The
+// legacy AllSteps surface remains available for callers that intentionally use
+// the pre-proof pipeline (for example stored run compatibility).
+func AllStepsWithProof() []StepName {
+	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepProof, StepProofReview, StepDocument, StepLint, StepPush, StepPR, StepCI}
 }
 
 // StepStatus represents the lifecycle state of a pipeline step.

@@ -164,6 +164,7 @@ type GlobalConfig struct {
 	Commit CommitRaw
 	Intent IntentRaw
 	Test   TestRaw
+	Proof  ProofRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -196,6 +197,7 @@ type globalConfigRaw struct {
 	Commit                  CommitRaw                  `yaml:"commit"`
 	Intent                  IntentRaw                  `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
+	Proof                   ProofRaw                   `yaml:"proof"`
 	Eval                    EvalRaw                    `yaml:"eval"`
 	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
 }
@@ -270,6 +272,13 @@ type RepoConfig struct {
 	// registered pending or failing check. No inference from workflow files,
 	// prior history, branch names, or grace-period expiry.
 	NoCI bool `yaml:"no_ci"`
+}
+
+// ProofRaw is the operator-controlled proof-step configuration. It is
+// intentionally absent from RepoConfig so a branch cannot replace the
+// guidance used to judge its own proof.
+type ProofRaw struct {
+	GuidanceFiles []string `yaml:"guidance_files"`
 }
 
 // DocumentRaw is the YAML representation of document-step settings.
@@ -551,6 +560,7 @@ type Config struct {
 	Commit                Commit
 	Intent                Intent
 	Test                  Test
+	Proof                 Proof
 	Document              Document
 	Review                Review
 	PR                    PR
@@ -564,6 +574,11 @@ type Config struct {
 	// intentionally has no CI (see the RepoConfig field). When true and the
 	// forge reports zero checks, the CI monitor treats that as all-checks-passed.
 	NoCI bool
+}
+
+// Proof is the resolved global-only proof configuration.
+type Proof struct {
+	GuidanceFiles []string
 }
 
 // PR is the resolved pull-request configuration.
@@ -958,6 +973,12 @@ intent:
 #     local_root: /var/lib/no-mistakes/evidence
 #     retention: 720h
 #     max_runs: 50
+
+# Operator-only proof guidance. These files are snapshotted and hashed for
+# each proof run; repository branches cannot add or disable guidance.
+# proof:
+#   guidance_files:
+#     - /absolute/path/to/proof-guidance.md
 
 # Local review evaluation corpus, used by "no-mistakes eval" to compare
 # agent candidates, pinned to an explicit model and reasoning effort, against
@@ -1795,6 +1816,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateEvalRaw(raw.Eval); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateProofRaw(raw.Proof); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -1907,9 +1931,34 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	cfg.Proof = raw.Proof
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
 
 	return cfg, nil
+}
+
+const maxProofGuidanceFiles = 16
+
+func validateProofRaw(proof ProofRaw) error {
+	if len(proof.GuidanceFiles) > maxProofGuidanceFiles {
+		return fmt.Errorf("proof.guidance_files has %d entries, maximum is %d", len(proof.GuidanceFiles), maxProofGuidanceFiles)
+	}
+	seen := make(map[string]struct{}, len(proof.GuidanceFiles))
+	for i, raw := range proof.GuidanceFiles {
+		file := strings.TrimSpace(raw)
+		if file == "" {
+			return fmt.Errorf("proof.guidance_files[%d] must not be empty", i)
+		}
+		if !filepath.IsAbs(file) {
+			return fmt.Errorf("proof.guidance_files[%d] must be an absolute path", i)
+		}
+		file = filepath.Clean(file)
+		if _, exists := seen[file]; exists {
+			return fmt.Errorf("proof.guidance_files[%d] duplicates %q", i, file)
+		}
+		seen[file] = struct{}{}
+	}
+	return nil
 }
 
 func normalizeForgeProfiles(raw ForgeProfiles) (ForgeProfiles, error) {
@@ -2579,6 +2628,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Commit:         commit,
 		Intent:         intent,
 		Test:           test,
+		Proof:          Proof{GuidanceFiles: append([]string(nil), global.Proof.GuidanceFiles...)},
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
 		PR:             PR{BaseBranch: strings.TrimSpace(repo.PR.BaseBranch)},

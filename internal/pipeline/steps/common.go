@@ -141,3 +141,27 @@ func AllSteps() []pipeline.Step {
 		&CIStep{},
 	}
 }
+
+// AllStepsWithProof returns the production sequence with the independent
+// output-proof producer and acceptance-review gates. It is selected by the
+// daemon when the operator has configured proof guidance; keeping the legacy
+// constructor above preserves compatibility for callers that intentionally
+// run the pre-proof sequence (including old replay fixtures).
+func AllStepsWithProof() []pipeline.Step {
+	if IsDemoMode() {
+		return DemoSteps()
+	}
+	return []pipeline.Step{
+		&IntentStep{},
+		&RebaseStep{},
+		&ReviewStep{},
+		&TestStep{},
+		&ProofStep{},
+		&ProofReviewStep{},
+		&DocumentStep{},
+		&LintStep{},
+		&PushStep{},
+		&PRStep{},
+		&CIStep{},
+	}
+}
