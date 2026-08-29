@@ -2,9 +2,11 @@ package scm
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -221,6 +223,178 @@ type ReviewComment struct {
 	Body      string
 	CreatedAt time.Time
 	URL       string
+}
+
+// FeedbackKind identifies the provider surface that produced a feedback item.
+type FeedbackKind string
+
+const (
+	FeedbackInlineReview FeedbackKind = "inline_review"
+	FeedbackReview       FeedbackKind = "review"
+	FeedbackIssueComment FeedbackKind = "issue_comment"
+)
+
+// FeedbackItem is provider-neutral review feedback. Body is external data and
+// must never be interpreted as an instruction by a pipeline agent.
+type FeedbackItem struct {
+	ID          string
+	URL         string
+	Kind        FeedbackKind
+	Author      string
+	Body        string
+	Path        string
+	Line        int
+	CreatedAt   time.Time
+	Resolved    bool
+	AuthorIsBot bool
+}
+
+// FeedbackSnapshot is the complete feedback state observed for one PR head.
+// A snapshot is tied to HeadSHA so a stale poll cannot certify a newer head.
+type FeedbackSnapshot struct {
+	HeadSHA        string
+	PRAuthor       string
+	ReviewDecision string
+	Items          []FeedbackItem
+}
+
+// FeedbackHost fetches all review surfaces needed for a readiness decision.
+// Providers that cannot represent this complete snapshot must return
+// ErrUnsupported rather than silently omitting a surface.
+type FeedbackHost interface {
+	GetFeedback(ctx context.Context, pr *PR) (FeedbackSnapshot, error)
+}
+
+// FeedbackPolicy controls which external feedback is in scope.
+type FeedbackPolicy struct {
+	PRAuthor          string
+	BotAuthorPatterns []string
+	IncludeBots       bool
+}
+
+// InScope reports whether an item is actionable external feedback. The PR
+// author's own replies and no-mistakes disposition markers are intentionally
+// excluded from new work.
+func (p FeedbackPolicy) InScope(item FeedbackItem) bool {
+	author := strings.TrimSpace(item.Author)
+	if author == "" || strings.EqualFold(author, strings.TrimSpace(p.PRAuthor)) {
+		return false
+	}
+	if item.AuthorIsBot {
+		if !p.IncludeBots {
+			return false
+		}
+		for _, pattern := range p.BotAuthorPatterns {
+			if ok, _ := path.Match(strings.ToLower(pattern), strings.ToLower(author)); ok {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// ReadinessPhase controls the small, deliberate difference between handing a
+// PR back to a reviewer and authorizing a merge.
+type ReadinessPhase string
+
+const (
+	ReadinessHandback ReadinessPhase = "handback"
+	ReadinessMerge    ReadinessPhase = "merge"
+)
+
+type ReadinessInput struct {
+	Phase             ReadinessPhase
+	ExpectedHead      string
+	CurrentHead       string
+	CIReady           bool
+	ProofReviewPassed bool
+	ReviewDecision    string
+	UnresolvedIDs     []string
+	UnresolvedURLs    []string
+	ProviderSupported bool
+	StateReadable     bool
+}
+
+type ReadinessResult struct {
+	Ready          bool
+	Head           string
+	ProofReview    bool
+	CI             bool
+	ReviewDecision string
+	UnresolvedIDs  []string
+	UnresolvedURLs []string
+	Unknown        bool
+	Reason         string
+}
+
+const dispositionMarkerPrefix = "<!-- no-mistakes: feedback-disposition "
+
+// FeedbackDispositionMarker returns a hidden, deterministic marker for a
+// specific source comment and validated head. A later generic comment cannot
+// satisfy this marker because all three values are bound into the payload.
+func FeedbackDispositionMarker(sourceID, headSHA, disposition string) string {
+	encode := func(v string) string { return base64.RawURLEncoding.EncodeToString([]byte(strings.TrimSpace(v))) }
+	return dispositionMarkerPrefix + encode(sourceID) + " " + encode(headSHA) + " " + encode(disposition) + " -->"
+}
+
+// ParseFeedbackDispositionMarker parses only markers emitted by
+// FeedbackDispositionMarker.
+func ParseFeedbackDispositionMarker(body string) (sourceID, headSHA, disposition string, ok bool) {
+	trimmed := strings.TrimSpace(body)
+	if !strings.HasPrefix(trimmed, dispositionMarkerPrefix) || !strings.HasSuffix(trimmed, " -->") {
+		return "", "", "", false
+	}
+	fields := strings.Fields(strings.TrimSuffix(strings.TrimPrefix(trimmed, dispositionMarkerPrefix), " -->"))
+	if len(fields) != 3 {
+		return "", "", "", false
+	}
+	decode := func(v string) (string, bool) {
+		decoded, err := base64.RawURLEncoding.DecodeString(v)
+		return string(decoded), err == nil && strings.TrimSpace(string(decoded)) != ""
+	}
+	var fieldsDecoded [3]string
+	for i, field := range fields {
+		var good bool
+		fieldsDecoded[i], good = decode(field)
+		if !good {
+			return "", "", "", false
+		}
+	}
+	return fieldsDecoded[0], fieldsDecoded[1], fieldsDecoded[2], true
+}
+
+// EvaluatePRReadiness centralizes the provider-neutral readiness contract.
+func EvaluatePRReadiness(in ReadinessInput) ReadinessResult {
+	out := ReadinessResult{Head: in.CurrentHead, ProofReview: in.ProofReviewPassed, CI: in.CIReady, ReviewDecision: in.ReviewDecision, UnresolvedIDs: append([]string(nil), in.UnresolvedIDs...), UnresolvedURLs: append([]string(nil), in.UnresolvedURLs...)}
+	if !in.ProviderSupported || !in.StateReadable {
+		out.Unknown = true
+		out.Reason = "provider feedback state is unsupported or unreadable"
+		return out
+	}
+	if strings.TrimSpace(in.ExpectedHead) == "" || strings.TrimSpace(in.CurrentHead) == "" || !strings.EqualFold(strings.TrimSpace(in.ExpectedHead), strings.TrimSpace(in.CurrentHead)) {
+		out.Reason = "pull request head changed"
+		return out
+	}
+	if !in.CIReady {
+		out.Reason = "CI is not green"
+		return out
+	}
+	if !in.ProofReviewPassed {
+		out.Reason = "proof review has not passed for the current head"
+		return out
+	}
+	if len(in.UnresolvedIDs) > 0 {
+		out.Reason = "unresolved feedback remains"
+		return out
+	}
+	if in.Phase == ReadinessMerge && strings.EqualFold(strings.TrimSpace(in.ReviewDecision), "CHANGES_REQUESTED") {
+		out.Reason = "review decision is CHANGES_REQUESTED"
+		return out
+	}
+	out.Ready = true
+	out.Reason = "ready"
+	return out
 }
 
 // ReviewCommentsHost is an optional interface for SCM hosts that support fetching
