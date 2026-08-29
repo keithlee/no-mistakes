@@ -237,9 +237,13 @@ const (
 // FeedbackItem is provider-neutral review feedback. Body is external data and
 // must never be interpreted as an instruction by a pipeline agent.
 type FeedbackItem struct {
-	ID          string
+	ID string
+	// ThreadID is the provider's stable thread identifier for inline comments.
+	// It is empty for reviews and top-level issue comments.
+	ThreadID    string
 	URL         string
 	Kind        FeedbackKind
+	ReviewState string
 	Author      string
 	Body        string
 	Path        string
@@ -265,6 +269,14 @@ type FeedbackHost interface {
 	GetFeedback(ctx context.Context, pr *PR) (FeedbackSnapshot, error)
 }
 
+// FeedbackActionsHost is the optional write surface for a provider's feedback
+// reconciliation. Implementations must fail closed on permission or API
+// errors; callers never treat a failed reply or resolution as dispositioned.
+type FeedbackActionsHost interface {
+	ReplyToFeedback(ctx context.Context, pr *PR, item FeedbackItem, body string) error
+	ResolveFeedback(ctx context.Context, pr *PR, item FeedbackItem) error
+}
+
 // FeedbackPolicy controls which external feedback is in scope.
 type FeedbackPolicy struct {
 	PRAuthor          string
@@ -276,6 +288,12 @@ type FeedbackPolicy struct {
 // author's own replies and no-mistakes disposition markers are intentionally
 // excluded from new work.
 func (p FeedbackPolicy) InScope(item FeedbackItem) bool {
+	// An APPROVED/COMMENTED submission is historical context, not unresolved
+	// work. Only a submitted CHANGES_REQUESTED review is an actionable review
+	// surface; inline and issue comments are evaluated independently.
+	if item.Kind == FeedbackReview && !strings.EqualFold(strings.TrimSpace(item.ReviewState), "CHANGES_REQUESTED") {
+		return false
+	}
 	author := strings.TrimSpace(item.Author)
 	if author == "" || strings.EqualFold(author, strings.TrimSpace(p.PRAuthor)) {
 		return false

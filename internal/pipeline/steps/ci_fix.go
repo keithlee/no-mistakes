@@ -123,6 +123,9 @@ CI logs:
 	if reviewCommentsSection != "" {
 		prompt += reviewCommentsSection
 	}
+	if s.feedbackPrompt != "" {
+		prompt += s.feedbackPrompt
+	}
 	prompt += userIntentPromptSection(sctx)
 	prompt += executionContextPromptSection(sctx.WorkDir)
 	prompt = testguidance.LateRepairPrompt(string(s.Name()), prompt)

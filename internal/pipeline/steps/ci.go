@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/feedback"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -48,7 +49,10 @@ type CIStep struct {
 	// branch. The bool is false when the SHA is a fallback/unknown value and
 	// must not re-arm the timeout. Overridable for testing; defaults to
 	// fetching the upstream default branch.
-	baseBranchTip func(context.Context) (string, bool)
+	baseBranchTip      func(context.Context) (string, bool)
+	feedbackReconciler *feedback.Reconciler
+	feedbackDecisions  map[string]feedback.Decision
+	feedbackPrompt     string
 }
 
 func (s *CIStep) Name() types.StepName { return types.StepCI }
@@ -350,6 +354,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				return nil, err
 			}
 		}
+		// Feedback is a separate, fresh provider snapshot. Any new in-scope item
+		// revokes readiness immediately and objective items restart at Review.
+		if outcome, feedbackErr := s.reconcileFeedback(sctx, host, pr); feedbackErr != nil {
+			return nil, feedbackErr
+		} else if outcome != nil {
+			return outcome, nil
+		}
 
 		// Check mergeable state if the provider supports it
 		mergeConflict := false
@@ -633,6 +644,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						sctx.Log("no CI checks reported yet, waiting for checks to register...")
 					}
 				case allChecksPassed(checks):
+					if outcome, feedbackErr := s.publishValidatedFeedback(sctx, host, pr); feedbackErr != nil {
+						return nil, feedbackErr
+					} else if outcome != nil {
+						return outcome, nil
+					}
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
 				default:
 					clearCIMonitorReady(sctx)

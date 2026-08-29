@@ -1417,7 +1417,7 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 				if review.Author == nil || strings.TrimSpace(review.State) == "PENDING" {
 					continue
 				}
-				snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(review.ID, 10), Kind: scm.FeedbackReview, Author: review.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(review.Author.Login), "[bot]"), Body: review.Body, CreatedAt: review.SubmittedAt})
+				snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(review.ID, 10), Kind: scm.FeedbackReview, ReviewState: review.State, Author: review.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(review.Author.Login), "[bot]"), Body: review.Body, CreatedAt: review.SubmittedAt})
 			}
 		}
 		for _, thread := range pull.ReviewThreads.Nodes {
@@ -1429,7 +1429,7 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 				if comment.Line != nil {
 					line = *comment.Line
 				}
-				snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(comment.ID, 10), Kind: scm.FeedbackInlineReview, URL: comment.URL, Author: comment.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(comment.Author.Login), "[bot]"), Body: comment.Body, Path: comment.Path, Line: line, CreatedAt: comment.CreatedAt, Resolved: thread.IsResolved})
+				snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(comment.ID, 10), ThreadID: thread.ID, Kind: scm.FeedbackInlineReview, URL: comment.URL, Author: comment.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(comment.Author.Login), "[bot]"), Body: comment.Body, Path: comment.Path, Line: line, CreatedAt: comment.CreatedAt, Resolved: thread.IsResolved})
 			}
 		}
 		pageInfo := pull.ReviewThreads.PageInfo
@@ -1488,4 +1488,52 @@ func (h *Host) getIssueFeedback(ctx context.Context, repo, number string) ([]scm
 		}
 	}
 	return items, nil
+}
+
+// ReplyToFeedback publishes a factual, head-bound response. Inline replies use
+// GitHub's review-comment reply endpoint; issue comments are ordinary PR
+// comments. Review submissions are intentionally not writable here because a
+// disposition must never masquerade as a reviewer decision.
+func (h *Host) ReplyToFeedback(ctx context.Context, pr *scm.PR, item scm.FeedbackItem, body string) error {
+	if pr == nil || strings.TrimSpace(body) == "" {
+		return errors.New("cannot reply to empty feedback or nil PR")
+	}
+	repo := h.repoSlug()
+	if repo == "" {
+		repo = RepoSlug(pr.URL)
+	}
+	if repo == "" || strings.TrimSpace(item.ID) == "" {
+		return errors.New("cannot determine repository or feedback ID")
+	}
+	path := "repos/" + repo + "/issues/" + strings.TrimSpace(pr.Number) + "/comments"
+	args := []string{"api"}
+	if h.host != "" {
+		args = append(args, "--hostname", h.host)
+	}
+	if item.Kind == scm.FeedbackInlineReview {
+		path = "repos/" + repo + "/pulls/comments/" + item.ID + "/replies"
+	}
+	args = append(args, path, "--method", "POST", "-f", "body="+body)
+	if out, err := h.cmd(ctx, "gh", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("publish GitHub feedback reply: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// ResolveFeedback resolves only inline review threads. Top-level comments and
+// submitted reviews have no provider resolution primitive in this contract.
+func (h *Host) ResolveFeedback(ctx context.Context, pr *scm.PR, item scm.FeedbackItem) error {
+	if item.Kind != scm.FeedbackInlineReview || strings.TrimSpace(item.ThreadID) == "" {
+		return scm.ErrUnsupported
+	}
+	query := `mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}`
+	args := []string{"api"}
+	if h.host != "" {
+		args = append(args, "--hostname", h.host)
+	}
+	args = append(args, "graphql", "-f", "query="+query, "-F", "threadId="+item.ThreadID)
+	if out, err := h.cmd(ctx, "gh", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("resolve GitHub feedback thread: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
