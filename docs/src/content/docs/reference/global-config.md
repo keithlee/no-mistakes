@@ -58,6 +58,10 @@ proof:
   guidance_files:
     - /absolute/path/to/operator-proof-guidance.md
 
+feedback:
+  include_bots: true
+  bot_author_patterns: ["*"]
+
 worktree_roots:
   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
 
@@ -688,6 +692,15 @@ resulting artifacts and caveats for the exact head.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `proof.guidance_files` | `string[]` | empty | Absolute operator-owned guidance paths; at most 16 files, each at most 256 KiB |
+
+### feedback
+
+Strict PR feedback reconciliation includes every external human inline thread
+and top-level PR comment. The PR author's own replies and disposition markers
+are excluded. Bot feedback is included only when `include_bots` is true and
+the author matches one of the configured shell-style `bot_author_patterns`;
+the default pattern is `*`. Feedback bodies remain untrusted data and are
+never instructions or authority.
 
 #### Local storage and cleanup
 
