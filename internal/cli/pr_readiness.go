@@ -92,7 +92,7 @@ func runAxiPRReadiness(cmd *cobra.Command, prURL, expectedHead, phase string) er
 	}
 	var unresolvedIDs, unresolvedURLs []string
 	for _, item := range snapshot.Items {
-		if item.Resolved || !policy.InScope(item) || markerAddresses(item, snapshot.HeadSHA) {
+		if item.Resolved || !policy.InScope(item) || markerAddresses(item, snapshot.Items, snapshot.PRAuthor, snapshot.HeadSHA) {
 			continue
 		}
 		unresolvedIDs = append(unresolvedIDs, item.ID)
@@ -104,9 +104,20 @@ func runAxiPRReadiness(cmd *cobra.Command, prURL, expectedHead, phase string) er
 	return emitReadiness(cmd, prURL, readinessPhase, result)
 }
 
-func markerAddresses(item scm.FeedbackItem, head string) bool {
-	markerID, markerHead, disposition, ok := scm.ParseFeedbackDispositionMarker(item.Body)
-	return ok && strings.TrimSpace(markerID) == strings.TrimSpace(item.ID) && strings.EqualFold(markerHead, strings.TrimSpace(head)) && strings.TrimSpace(disposition) != ""
+func markerAddresses(item scm.FeedbackItem, all []scm.FeedbackItem, prAuthor, head string) bool {
+	for _, candidate := range all {
+		// A disposition is a separate PR-author reply bound to the source ID,
+		// exact validated head, and explicit disposition. A generic later
+		// comment, or a marker authored by someone else, never counts.
+		if !strings.EqualFold(strings.TrimSpace(candidate.Author), strings.TrimSpace(prAuthor)) {
+			continue
+		}
+		markerID, markerHead, disposition, ok := scm.ParseFeedbackDispositionMarker(candidate.Body)
+		if ok && strings.TrimSpace(markerID) == strings.TrimSpace(item.ID) && strings.EqualFold(markerHead, strings.TrimSpace(head)) && strings.TrimSpace(disposition) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // proofReviewForCurrentHead reads the local run ledger and accepts proof only
