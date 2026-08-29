@@ -780,6 +780,35 @@ func TestGetChecksRejectsIncompleteWorkflowPagination(t *testing.T) {
 	}
 }
 
+func TestGetPRContentReadsTitleAndBody(t *testing.T) {
+	t.Parallel()
+
+	body := "## Pipeline\n\n" + "Updates from no-mistakes\n"
+	encoded, err := json.Marshal(map[string]string{"title": "fix: restamp", "body": body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 42 --repo test/repo --json title,body": {stdout: string(encoded) + "\n"},
+	}), nil, "", "test/repo")
+
+	got, err := host.GetPRContent(context.Background(), &scm.PR{Number: "42"})
+	if err != nil {
+		t.Fatalf("GetPRContent() error = %v", err)
+	}
+	if got.Title != "fix: restamp" || got.Body != body {
+		t.Fatalf("GetPRContent() = %+v, want title and body from gh", got)
+	}
+}
+
+func TestGetPRContentFailsClosedWithoutIdentity(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(nil), nil, "", "test/repo")
+	if _, err := host.GetPRContent(context.Background(), &scm.PR{}); err == nil {
+		t.Fatal("GetPRContent() with no PR identity: expected error, got nil")
+	}
+}
+
 func TestGetPRStatePassesRepoFlag(t *testing.T) {
 	t.Parallel()
 

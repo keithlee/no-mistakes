@@ -402,6 +402,34 @@ func fakeCIGHReconcileHandler(args []string) {
 	os.Exit(1)
 }
 
+func fakeGHHandlePRContentCommands(args []string, joined string) {
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json title,body") {
+		title := os.Getenv("FAKE_CLI_PR_TITLE")
+		if title == "" {
+			title = "test pr"
+		}
+		body := os.Getenv("FAKE_CLI_PR_BODY")
+		if path := os.Getenv("FAKE_CLI_PR_BODY_FILE"); path != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			body = string(data)
+		}
+		payload, err := json.Marshal(map[string]string{"title": title, "body": body})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(string(payload))
+		os.Exit(0)
+	}
+	if strings.Contains(joined, "pr edit") {
+		os.Exit(0)
+	}
+}
+
 func fakeCIGHHandler(args []string) {
 	state := os.Getenv("FAKE_CLI_STATE")
 	stateErr := os.Getenv("FAKE_CLI_STATE_ERR")
@@ -414,6 +442,7 @@ func fakeCIGHHandler(args []string) {
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
+	fakeGHHandlePRContentCommands(args, joined)
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid") {
 		fmt.Println(os.Getenv("FAKE_CLI_PR_HEAD_SHA"))
 		os.Exit(0)
@@ -488,6 +517,7 @@ func fakeCIGHSequenceHandler(args []string) {
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
+	fakeGHHandlePRContentCommands(args, joined)
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json mergeable") {
 		if mergeableErr != "" {
 			fmt.Fprintln(os.Stderr, mergeableErr)
@@ -696,6 +726,7 @@ func fakeCIGHNoChecksHandler(args []string) {
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
+	fakeGHHandlePRContentCommands(args, joined)
 	if strings.Contains(joined, "pr checks") {
 		fmt.Fprintln(os.Stderr, "no checks reported on the 'feature/e2e' branch")
 		os.Exit(1)

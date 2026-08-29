@@ -321,6 +321,29 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	return pr, nil
 }
 
+var _ scm.PRContentReader = (*Host)(nil)
+
+func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
+	selector, err := prSelector(pr)
+	if err != nil {
+		return scm.PRContent{}, err
+	}
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
+	args = append(args, "--json", "title,body")
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return scm.PRContent{}, fmt.Errorf("gh pr view: %w", err)
+	}
+	var parsed struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return scm.PRContent{}, fmt.Errorf("parse gh pr view: %w", err)
+	}
+	return scm.PRContent{Title: parsed.Title, Body: parsed.Body}, nil
+}
+
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
 	selector, err := prSelector(pr)
 	if err != nil {

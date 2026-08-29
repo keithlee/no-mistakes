@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,18 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// ciFailingCheckFixRules is the CI-repair prompt contract for a failing check.
+// The narrow-fix sentence matches the review fixer so both apply one discipline.
+const ciFailingCheckFixRules = `- If a failing check is caused by this PR's code (a broken test, build, lint, or similar defect in the change), you MUST produce file changes that fix it. A real failing test or build must still be fixed.
+		- If a failing check is not caused by the code under review (a stale or superseded check run, an infrastructure or attestation check such as "PR must be raised via no-mistakes" that fails only because a later pipeline push moved the head, or any failure external to the code), you MAY conclude that no code change is warranted. Report that conclusion instead of editing files. Do not invent work to satisfy a check the code did not cause.
+		- If a test fails only on a specific OS (e.g. Windows CRLF, path separators), fix the test to be cross-platform.
+		- If a test is flaky, make it deterministic.
+		- Make the smallest correct root-cause fix.
+		- Fix the reported instance narrowly. Prefer doing so by addressing a deeper architectural reason and simplifying it, than introducing machinery to handle the symptoms.
+		- Do not add new subsystems, guards, instructions, or behaviors beyond what the specific failing check requires.
+		- Do not refactor beyond what is needed for that root-cause fix.
+		- Verify the fix by running the most relevant commands locally before finishing.`
 
 // autoFixCI runs the agent to fix CI failures and/or merge conflicts, then
 // records the repair under the run's uniform continuity rule: published
@@ -68,12 +81,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	switch {
 	case len(failingNames) > 0 && mergeConflict:
 		promptIntro = "The following CI checks have failed and the PR has merge conflicts with the base branch. Diagnose and fix the CI issues, then rebase onto the base branch and resolve the merge conflicts."
-		promptRules = `- You MUST produce file changes that fix the failing checks. Do not conclude that nothing needs to change.
-		- If a test fails only on a specific OS (e.g. Windows CRLF, path separators), fix the test to be cross-platform.
-		- If a test is flaky, make it deterministic.
-		- Make the smallest correct root-cause fix.
-		- Do not refactor beyond what is needed for that root-cause fix.
-		- Verify the fix by running the most relevant commands locally before finishing.`
+		promptRules = ciFailingCheckFixRules
 	case mergeConflict:
 		promptIntro = "The PR has merge conflicts with the base branch. Rebase onto the base branch and resolve the merge conflicts."
 		promptRules = `- Resolve the merge conflicts by applying the minimal necessary changes.
@@ -81,12 +89,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 		- Verify the rebase completes cleanly before finishing.`
 	default:
 		promptIntro = "The following CI checks have failed on this PR. Diagnose and fix the issues."
-		promptRules = `- You MUST produce file changes that fix the failing checks. Do not conclude that nothing needs to change.
-		- If a test fails only on a specific OS (e.g. Windows CRLF, path separators), fix the test to be cross-platform.
-		- If a test is flaky, make it deterministic.
-		- Make the smallest correct root-cause fix.
-		- Do not refactor beyond what is needed for that root-cause fix.
-		- Verify the fix by running the most relevant commands locally before finishing.`
+		promptRules = ciFailingCheckFixRules
 	}
 
 	prompt := fmt.Sprintf(
@@ -383,6 +386,58 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 	if err := publishRunHead(sctx, headSHA, headSHA); err != nil {
 		return ciRepairResult{}, err
 	}
+	if err := restampPublishedAttestation(sctx, headSHA); err != nil {
+		sctx.Log(fmt.Sprintf("warning: could not rebind pipeline attestation to %s: %v", shortObjectID(headSHA), err))
+	}
 	sctx.Log("committed and pushed CI repair")
 	return ciRepairResult{HeadAdvanced: true}, nil
+}
+
+// restampPublishedAttestation rebinds an existing pipeline attestation in the
+// PR body to the head that was just published. A PR that never carried an
+// attestation is left unchanged, so a contribution that did not come through
+// no-mistakes still fails the gate. Failure to read or update the body is
+// returned to the caller; the push itself has already succeeded.
+func restampPublishedAttestation(sctx *pipeline.StepContext, headSHA string) error {
+	if sctx == nil || sctx.Run == nil || sctx.Run.PRURL == nil || strings.TrimSpace(*sctx.Run.PRURL) == "" {
+		return nil
+	}
+	provider := resolvedProvider(sctx)
+	host, reason := buildHost(sctx, provider)
+	if host == nil {
+		if strings.TrimSpace(reason) != "" {
+			sctx.Log(fmt.Sprintf("skipping attestation rebind: %s", reason))
+		}
+		return nil
+	}
+	pr := &scm.PR{URL: strings.TrimSpace(*sctx.Run.PRURL)}
+	if n, err := scm.ExtractPRNumber(pr.URL); err == nil {
+		pr.Number = n
+	}
+	return restampPRAttestation(sctx.Ctx, host, pr, headSHA, sctx.Log)
+}
+
+// restampPRAttestation fetches the current PR body, rebinds a live pipeline
+// attestation to newHeadSHA, and writes the body back. It does not insert an
+// attestation that was not already there.
+func restampPRAttestation(ctx context.Context, host scm.Host, pr *scm.PR, newHeadSHA string, logfn func(string)) error {
+	reader, ok := host.(scm.PRContentReader)
+	if !ok || pr == nil {
+		return nil
+	}
+	content, err := reader.GetPRContent(ctx, pr)
+	if err != nil {
+		return err
+	}
+	updated, rebound := rebindPipelineAttestationHead(content.Body, newHeadSHA)
+	if !rebound || updated == content.Body {
+		return nil
+	}
+	if _, err := host.UpdatePR(ctx, pr, scm.PRContent{Title: content.Title, Body: updated}); err != nil {
+		return err
+	}
+	if logfn != nil {
+		logfn(fmt.Sprintf("rebound pipeline attestation to %s", shortObjectID(newHeadSHA)))
+	}
+	return nil
 }

@@ -1104,11 +1104,32 @@ func TestCIStep_AutoFixPromptIncludesMustFixInstruction(t *testing.T) {
 	if capturedPrompt == "" {
 		t.Fatal("expected agent to be called with a prompt")
 	}
-	if !strings.Contains(capturedPrompt, "You MUST produce file changes") {
-		t.Errorf("prompt should instruct agent to produce changes, got:\n%s", capturedPrompt)
+	if !strings.Contains(capturedPrompt, "If a failing check is caused by this PR's code") {
+		t.Errorf("prompt should still require a code/test failure to be fixed, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "you MUST produce file changes that fix it") {
+		t.Errorf("prompt should instruct agent to produce changes for a genuine code defect, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "A real failing test or build must still be fixed") {
+		t.Errorf("prompt should keep the genuine-failure mandate, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "you MAY conclude that no code change is warranted") {
+		t.Errorf("prompt should allow no-edit when the failing check is not a code defect, got:\n%s", capturedPrompt)
+	}
+	if strings.Contains(capturedPrompt, "Do not conclude that nothing needs to change") {
+		t.Errorf("prompt should not force an edit for every red check, got:\n%s", capturedPrompt)
 	}
 	if !strings.Contains(capturedPrompt, "smallest correct root-cause fix") {
 		t.Errorf("prompt should prefer root-cause fixes over bandaids, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "Fix the reported instance narrowly") {
+		t.Errorf("prompt should scope the fix to the reported instance, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "Prefer doing so by addressing a deeper architectural reason and simplifying it, than introducing machinery to handle the symptoms") {
+		t.Errorf("prompt should prefer simplification over symptom machinery, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "Do not add new subsystems, guards, instructions, or behaviors beyond what the specific failing check requires") {
+		t.Errorf("prompt should forbid extra machinery, got:\n%s", capturedPrompt)
 	}
 	assertTestQualityRulePrompt(t, capturedPrompt)
 	if strings.Contains(capturedPrompt, "Make the minimal change needed") {
@@ -1119,6 +1140,80 @@ func TestCIStep_AutoFixPromptIncludesMustFixInstruction(t *testing.T) {
 	}
 	if !strings.Contains(capturedPrompt, dir) || !strings.Contains(capturedPrompt, "Path contract:") {
 		t.Errorf("prompt should include execution context with workdir, got:\n%s", capturedPrompt)
+	}
+}
+
+func TestCIStep_FixPromptPrefersSimplificationOverMachinery(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	var capturedPrompt string
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			capturedPrompt = opts.Prompt
+			return &agent.Result{}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42"}
+	if _, err := (&CIStep{}).autoFixCI(sctx, &forgejoLogTestHost{}, pr, []string{"test"}, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Fix the reported instance narrowly.",
+		"Prefer doing so by addressing a deeper architectural reason and simplifying it, than introducing machinery to handle the symptoms.",
+		"Do not add new subsystems, guards, instructions, or behaviors beyond what the specific failing check requires",
+		"smallest correct root-cause fix",
+	} {
+		if !strings.Contains(capturedPrompt, want) {
+			t.Errorf("CI fix prompt missing narrow-fix contract %q:\n%s", want, capturedPrompt)
+		}
+	}
+	if strings.Contains(capturedPrompt, "fix the deepest practical cause instead") {
+		t.Errorf("CI fix prompt still licenses expanding to the deepest practical cause:\n%s", capturedPrompt)
+	}
+}
+
+func TestCIStep_FixPromptDistinguishesCodeDefectFromExternalFailure(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	var capturedPrompt string
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			capturedPrompt = opts.Prompt
+			return &agent.Result{}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42"}
+	if _, err := (&CIStep{}).autoFixCI(sctx, &forgejoLogTestHost{}, pr, []string{"PR must be raised via no-mistakes"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if capturedPrompt == "" {
+		t.Fatal("expected the CI fixer prompt to be constructed")
+	}
+	if !strings.Contains(capturedPrompt, "A real failing test or build must still be fixed") {
+		t.Errorf("prompt lost the genuine-failure mandate:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, `you MUST produce file changes that fix it`) {
+		t.Errorf("prompt lost the code-defect must-fix rule:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "you MAY conclude that no code change is warranted") {
+		t.Errorf("prompt should allow no-edit for a non-code check failure:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "not caused by the code under review") {
+		t.Errorf("prompt should draw the caused-by-this-PR-code line:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "PR must be raised via no-mistakes") {
+		t.Errorf("prompt should name the attestation check as a non-code example:\n%s", capturedPrompt)
+	}
+	if strings.Contains(capturedPrompt, "Do not conclude that nothing needs to change") {
+		t.Errorf("prompt should not force an edit for every red check:\n%s", capturedPrompt)
 	}
 }
 
