@@ -122,21 +122,27 @@ func (s *CIStep) publishValidatedFeedback(sctx *pipeline.StepContext, host scm.H
 	}
 	actions := s.feedbackReconciler.ValidationPassed(sctx.Run.HeadSHA, true, true)
 	for _, action := range actions {
-		body := action.Item.Body
-		if p := s.feedbackDecisions[action.Item.ID]; p.ReplyBody != "" {
-			body = p.ReplyBody
+		if action.Action == feedback.Reply {
+			body := action.Item.Body
+			if p := s.feedbackDecisions[action.Item.ID]; p.ReplyBody != "" {
+				body = p.ReplyBody
+			}
+			body = strings.TrimSpace(body) + "\n\n" + scm.FeedbackDispositionMarker(action.Item.ID, sctx.Run.HeadSHA, "fixed")
+			if err := ah.ReplyToFeedback(sctx.Ctx, pr, action.Item, body); err != nil {
+				clearCIMonitorReady(sctx)
+				return feedbackGate("validated feedback reply failed; disposition remains blocked", action.Item), nil
+			}
+			resolution, _ := s.feedbackReconciler.Disposition(action.Item.ID, sctx.Run.HeadSHA, true)
+			if resolution.Action != feedback.Resolve {
+				continue
+			}
 		}
-		body = strings.TrimSpace(body) + "\n\n" + scm.FeedbackDispositionMarker(action.Item.ID, sctx.Run.HeadSHA, "fixed")
-		if err := ah.ReplyToFeedback(sctx.Ctx, pr, action.Item, body); err != nil {
-			clearCIMonitorReady(sctx)
-			return feedbackGate("validated feedback reply failed; disposition remains blocked", action.Item), nil
-		}
-		resolution, _ := s.feedbackReconciler.Disposition(action.Item.ID, sctx.Run.HeadSHA, true)
-		if resolution.Action == feedback.Resolve {
+		if action.Action == feedback.Resolve || action.Action == feedback.Reply {
 			if err := ah.ResolveFeedback(sctx.Ctx, pr, action.Item); err != nil {
 				clearCIMonitorReady(sctx)
 				return feedbackGate("feedback reply succeeded but thread resolution failed", action.Item), nil
 			}
+			s.feedbackReconciler.Resolved(action.Item.ID)
 		}
 	}
 	return nil, nil

@@ -6,6 +6,7 @@ package feedback
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -44,6 +45,7 @@ type Pending struct {
 	ReplyBody     string
 	Attempts      int
 	ValidatedHead string
+	Replied       bool
 }
 
 type Result struct {
@@ -144,8 +146,20 @@ func (r *Reconciler) ValidationPassed(head string, ci, proofReview bool) []Resul
 		return nil
 	}
 	var out []Result
-	for id, p := range r.pending {
+	ids := make([]string, 0, len(r.pending))
+	for id := range r.pending {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p := r.pending[id]
 		if p.SourceHead != head {
+			continue
+		}
+		if p.Replied {
+			if p.Item.Kind == scm.FeedbackInlineReview {
+				out = append(out, Result{Action: Resolve, Item: p.Item, Reason: "reply already published; retry resolution"})
+			}
 			continue
 		}
 		if p.ValidatedHead != head {
@@ -164,9 +178,16 @@ func (r *Reconciler) Disposition(itemID, head string, replied bool) (Result, boo
 	if !ok || !replied || p.ValidatedHead != head {
 		return Result{Action: Blocked, Reason: "feedback reply is not bound to validated head"}, false
 	}
-	delete(r.pending, itemID)
+	p.Replied = true
+	r.pending[itemID] = p
 	if p.Item.Kind == scm.FeedbackInlineReview {
 		return Result{Action: Resolve, Item: p.Item, Reason: "reply published on validated head"}, true
 	}
+	delete(r.pending, itemID)
 	return Result{Action: NoAction, Item: p.Item, Reason: "top-level feedback disposition marker published"}, true
 }
+
+// Resolved retires an inline item only after the provider confirms the thread
+// resolution write. Keeping it pending across an API error makes recovery
+// deterministic and prevents an unresolved thread from being forgotten.
+func (r *Reconciler) Resolved(itemID string) { delete(r.pending, itemID) }
