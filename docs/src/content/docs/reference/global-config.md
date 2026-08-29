@@ -54,6 +54,10 @@ log_level: info
 
 session_reuse: true
 
+proof:
+  guidance_files:
+    - /absolute/path/to/operator-proof-guidance.md
+
 worktree_roots:
   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
 
@@ -671,6 +675,19 @@ The publisher never force-pushes. It appends to the fetched evidence-branch tip 
 Publication is also refused when the remote cannot be read or pushed, an artifact exceeds 64 MiB, a run exceeds 500 files or 256 MiB, or another writer wins the retry. The PR body then keeps its local rendering instead of adding links that would not resolve.
 Evidence-branch publication currently supports GitHub links only. On other providers, no evidence branch is pushed and the PR body keeps its local rendering.
 Enabling this pushes a branch to your remote, so pick a `branch` name your CI workflows do not build.
+
+### proof.guidance_files
+
+Operator-only absolute guidance files used by the Proof producer gate. Each
+configured file is snapshotted and SHA-256 hashed at the start of every Proof
+run. Missing, unreadable, invalid UTF-8, duplicated, empty, or oversized files
+fail closed. This field is global-only: `.no-mistakes.yaml` cannot inject,
+replace, or disable operator guidance. ProofReview independently checks the
+resulting artifacts and caveats for the exact head.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `proof.guidance_files` | `string[]` | empty | Absolute operator-owned guidance paths; at most 16 files, each at most 256 KiB |
 
 #### Local storage and cleanup
 
