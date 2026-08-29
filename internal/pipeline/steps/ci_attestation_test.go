@@ -236,6 +236,23 @@ func TestRestampPRAttestation_RetriesAndRequiresSettlement(t *testing.T) {
 	})
 }
 
+type readerlessHost struct{ scm.Host }
+
+func TestRestampPRAttestation_MissingReaderIsSkipped(t *testing.T) {
+	t.Parallel()
+	pr := &scm.PR{Number: "42", URL: "https://bitbucket.org/test/repo/pull-requests/42"}
+	var logs []string
+	err := restampPRAttestation(context.Background(), &readerlessHost{}, pr, strings.Repeat("ab", 20), func(s string) {
+		logs = append(logs, s)
+	})
+	if err != nil {
+		t.Fatalf("missing reader must skip, not fail: %v", err)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "cannot read PR content") {
+		t.Fatalf("skip warning = %q, want a missing-reader warning", logs)
+	}
+}
+
 func TestCIStep_PublishRepairRebindsAttestationAcrossRepairPushes(t *testing.T) {
 	f := newCIRepairFixture(t, false, writeCIFix)
 	original := compliantPipelineBody(t, f.headSHA)
@@ -284,6 +301,7 @@ func TestCIStep_UnsettledRepairPushParksImmediately(t *testing.T) {
 	if err := os.WriteFile(bodyFile, []byte(compliantPipelineBody(t, f.headSHA)), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	f.sctx.Repo.UpstreamURL = "https://github.com/test/repo.git"
 	f.sctx.Env = append(f.sctx.Env,
 		"FAKE_CLI_PR_BODY_FILE="+bodyFile,
 		"FAKE_CLI_PR_TITLE=fix: ci",
@@ -341,6 +359,25 @@ func TestCIStep_PublishRepairFailsWhenAttestationCannotSettle(t *testing.T) {
 	}
 	if got, _ := runVerifyPy(t, string(body), newHead); got != "failure" {
 		t.Fatal("failed PR edit unexpectedly settled the attestation")
+	}
+}
+
+func TestCIStep_PublishRepairSkipsRestampWithoutReader(t *testing.T) {
+	f := newCIRepairFixture(t, false, writeCIFix)
+	gitlabPR := "https://gitlab.com/test/repo/-/merge_requests/42"
+	f.sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
+	f.sctx.Run.PRURL = &gitlabPR
+	writeCIFix(f.dir)
+
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+	if err != nil {
+		t.Fatalf("commitRepair: %v\nlog:\n%s", err, f.log())
+	}
+	if !repair.HeadAdvanced || repair.Revalidate {
+		t.Fatalf("repair = %+v, want a published head advance without restamp", repair)
+	}
+	if !strings.Contains(f.log(), "skipping attestation rebind") {
+		t.Fatalf("log did not skip restamp on a host without a PR content reader:\n%s", f.log())
 	}
 }
 

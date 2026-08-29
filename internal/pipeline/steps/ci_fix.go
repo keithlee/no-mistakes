@@ -440,10 +440,13 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 }
 
 // restampPublishedAttestation rebinds an existing pipeline attestation in the
-// PR body to the head that was just published. A PR that never carried an
-// attestation is left unchanged, so a contribution that did not come through
-// no-mistakes still fails the gate. Failure to read or update the body is
-// returned to the caller; the push itself has already succeeded.
+// PR body to the head that was just published. Settlement applies only when
+// the host both emits that HTML attestation and can rewrite the PR body
+// (GitHub today). Every other provider is a no-op: there is no stale
+// attestation to leave. A PR that never carried an attestation is left
+// unchanged, so a contribution that did not come through no-mistakes still
+// fails the gate. Failure to read or update a body that does carry a live
+// attestation is returned to the caller; the push itself has already succeeded.
 func restampPublishedAttestation(sctx *pipeline.StepContext, headSHA string) error {
 	if sctx == nil || sctx.Run == nil || sctx.Run.PRURL == nil || strings.TrimSpace(*sctx.Run.PRURL) == "" {
 		return nil
@@ -451,10 +454,13 @@ func restampPublishedAttestation(sctx *pipeline.StepContext, headSHA string) err
 	provider := resolvedProvider(sctx)
 	host, reason := buildHost(sctx, provider)
 	if host == nil {
-		if strings.TrimSpace(reason) == "" {
-			reason = "SCM host is unavailable"
+		if sctx.Log != nil {
+			if strings.TrimSpace(reason) == "" {
+				reason = "SCM host is unavailable"
+			}
+			sctx.Log(fmt.Sprintf("skipping attestation rebind: %s", reason))
 		}
-		return fmt.Errorf("build SCM host: %s", reason)
+		return nil
 	}
 	pr := &scm.PR{URL: strings.TrimSpace(*sctx.Run.PRURL)}
 	if n, err := scm.ExtractPRNumber(pr.URL); err == nil {
@@ -465,14 +471,17 @@ func restampPublishedAttestation(sctx *pipeline.StepContext, headSHA string) err
 
 // restampPRAttestation fetches the current PR body, rebinds a live pipeline
 // attestation to newHeadSHA, and writes the body back. It does not insert an
-// attestation that was not already there.
+// attestation that was not already there. A host without PRContentReader is
+// skipped with a warning rather than failed: missing-reader is not a GitHub
+// settlement miss, and making it fatal parks every non-GitHub repair after
+// a successful push.
 func restampPRAttestation(ctx context.Context, host scm.Host, pr *scm.PR, newHeadSHA string, logfn func(string)) error {
 	reader, ok := host.(scm.PRContentReader)
-	if !ok {
-		return fmt.Errorf("SCM host cannot read PR content")
-	}
-	if pr == nil {
-		return fmt.Errorf("PR is unavailable")
+	if !ok || pr == nil {
+		if logfn != nil && !ok {
+			logfn("skipping attestation rebind: SCM host cannot read PR content")
+		}
+		return nil
 	}
 	const attempts = 3
 	var lastErr error
