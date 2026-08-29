@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -547,6 +548,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					if outcome := ciFixAgentBudgetOutcome(sctx, issueDesc, err); outcome != nil {
 						return outcome, nil
 					}
+					if err != nil && errors.Is(err, errCIAttestationUnsettled) {
+						sctx.Log(fmt.Sprintf("CI repair push is not settled: %v", err))
+						return ciFailureOutcome(reportedIssues, mergeConflict, err.Error()), nil
+					}
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI manual fix failed: %v", err))
 					} else if repair.HeadAdvanced || sctx.Run.HeadSHA != previousHeadSHA {
@@ -558,6 +563,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						// The repair was published, so the monitor stays on
 						// this run and waits for the provider to re-run the
 						// checks against the new head.
+					} else if repair.NoCodeChangeNeeded {
+						sctx.Log(fmt.Sprintf("CI fixer concluded no code change is needed: %s", repair.Summary))
+						return ciFailureOutcome(reportedIssues, mergeConflict, repair.Summary), nil
 					} else {
 						sctx.Log("CI fix produced no changes, returning for manual intervention...")
 						return ciFailureOutcome(reportedIssues, mergeConflict, "CI fix produced no changes - failures require manual intervention"), nil
@@ -586,6 +594,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					if outcome := ciFixAgentBudgetOutcome(sctx, issueDesc, err); outcome != nil {
 						return outcome, nil
 					}
+					if err != nil && errors.Is(err, errCIAttestationUnsettled) {
+						sctx.Log(fmt.Sprintf("CI repair push is not settled: %v", err))
+						return ciFailureOutcome(reportedIssues, mergeConflict, err.Error()), nil
+					}
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI auto-fix failed: %v", err))
 					} else if repair.HeadAdvanced || sctx.Run.HeadSHA != previousHeadSHA {
@@ -597,6 +609,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						// The repair was published, so the monitor stays on
 						// this run and waits for the provider to re-run the
 						// checks against the new head.
+					} else if repair.NoCodeChangeNeeded {
+						sctx.Log(fmt.Sprintf("CI fixer concluded no code change is needed: %s", repair.Summary))
+						return ciFailureOutcome(reportedIssues, mergeConflict, repair.Summary), nil
 					} else {
 						// No changes produced - don't set lastFixedChecks so next
 						// poll treats this as a new failure and retries if attempts remain.

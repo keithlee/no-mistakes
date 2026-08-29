@@ -867,8 +867,7 @@ func TestCIStep_AutoFixNoChanges_CountsAsAttempt(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
-			// Agent "investigates" but produces NO changes
-			return &agent.Result{}, nil
+			return &agent.Result{Output: json.RawMessage(`{"summary":"test failure still requires a code repair","code_change_needed":true}`)}, nil
 		},
 	}
 
@@ -940,6 +939,50 @@ func TestCIStep_AutoFixNoChanges_CountsAsAttempt(t *testing.T) {
 	}
 	if waitCount > 0 {
 		t.Errorf("expected no 'fix already attempted' loops when agent produces no changes, got %d", waitCount)
+	}
+}
+
+func TestCIStep_AutoFixExternalFailureStopsWithAgentConclusion(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	checksJSON := `[{"name":"PR must be raised via no-mistakes","status":"COMPLETED","conclusion":"failure","bucket":"fail"}]`
+	fixCount := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			fixCount++
+			return &agent.Result{Output: json.RawMessage(`{"summary":"attestation failure is external to the PR code","code_change_needed":false}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = fakeCIGH(t, "OPEN", checksJSON)
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.CITimeout = 30 * time.Second
+	sctx.Config.AutoFix = config.AutoFix{CI: 3}
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+
+	outcome, err := (&CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %#v, want stopped approval outcome", outcome)
+	}
+	if fixCount != 1 {
+		t.Fatalf("fix attempts = %d, want one trusted no-change conclusion", fixCount)
+	}
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if findings.Summary != "attestation failure is external to the PR code" {
+		t.Fatalf("reported conclusion = %q", findings.Summary)
 	}
 }
 

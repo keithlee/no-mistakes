@@ -3,6 +3,8 @@ package steps
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,10 +115,11 @@ func TestRebindPipelineAttestationHead_VerifyPyRoundTrip(t *testing.T) {
 
 type attestationTestHost struct {
 	scm.Host
-	title   string
-	body    string
-	updated scm.PRContent
-	updates int
+	title       string
+	body        string
+	updated     scm.PRContent
+	updates     int
+	failUpdates int
 }
 
 func (h *attestationTestHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
@@ -125,6 +128,9 @@ func (h *attestationTestHost) GetPRContent(context.Context, *scm.PR) (scm.PRCont
 
 func (h *attestationTestHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
 	h.updates++
+	if h.updates <= h.failUpdates {
+		return nil, fmt.Errorf("temporary PR update failure")
+	}
 	h.updated = content
 	h.body = content.Body
 	return pr, nil
@@ -189,6 +195,47 @@ func TestRestampPRAttestation_RebindsExistingAndSkipsMissing(t *testing.T) {
 	})
 }
 
+func TestRestampPRAttestation_RetriesAndRequiresSettlement(t *testing.T) {
+	t.Parallel()
+	pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42"}
+	repairHead := strings.Repeat("12", 20)
+
+	t.Run("transient_failure_settles", func(t *testing.T) {
+		host := &attestationTestHost{
+			title:       "fix: ci",
+			body:        compliantPipelineBody(t, testPipelineHeadSHA),
+			failUpdates: 2,
+		}
+		if err := restampPRAttestation(context.Background(), host, pr, repairHead, nil); err != nil {
+			t.Fatal(err)
+		}
+		if host.updates != 3 {
+			t.Fatalf("UpdatePR calls = %d, want 3", host.updates)
+		}
+		if got, out := runVerifyPy(t, host.body, repairHead); got != "success" {
+			t.Fatalf("settled body must pass verification, got %s\n%s", got, out)
+		}
+	})
+
+	t.Run("persistent_failure_is_returned", func(t *testing.T) {
+		host := &attestationTestHost{
+			title:       "fix: ci",
+			body:        compliantPipelineBody(t, testPipelineHeadSHA),
+			failUpdates: 3,
+		}
+		err := restampPRAttestation(context.Background(), host, pr, repairHead, nil)
+		if err == nil || !strings.Contains(err.Error(), "failed after 3 attempts") {
+			t.Fatalf("restamp error = %v, want exhausted settlement error", err)
+		}
+		if host.updates != 3 {
+			t.Fatalf("UpdatePR calls = %d, want 3", host.updates)
+		}
+		if got, _ := runVerifyPy(t, host.body, repairHead); got != "failure" {
+			t.Fatal("unsettled body unexpectedly passed verification")
+		}
+	})
+}
+
 func TestCIStep_PublishRepairRebindsAttestationAcrossRepairPushes(t *testing.T) {
 	f := newCIRepairFixture(t, false, writeCIFix)
 	original := compliantPipelineBody(t, f.headSHA)
@@ -228,6 +275,72 @@ func TestCIStep_PublishRepairRebindsAttestationAcrossRepairPushes(t *testing.T) 
 	}
 	if got, out := runVerifyPy(t, original, newHead); got != "failure" {
 		t.Fatalf("the pre-repair attestation must fail at the new head, got %s\n%s", got, out)
+	}
+}
+
+func TestCIStep_UnsettledRepairPushParksImmediately(t *testing.T) {
+	f := newCIRepairFixture(t, false, writeCIFix)
+	bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
+	if err := os.WriteFile(bodyFile, []byte(compliantPipelineBody(t, f.headSHA)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.sctx.Env = append(f.sctx.Env,
+		"FAKE_CLI_PR_BODY_FILE="+bodyFile,
+		"FAKE_CLI_PR_TITLE=fix: ci",
+		"FAKE_CLI_PR_EDIT_ERR=provider unavailable",
+	)
+
+	outcome, err := f.run(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %#v, want unsettled push approval gate", outcome)
+	}
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(findings.Summary, "attestation is unsettled") {
+		t.Fatalf("findings summary = %q, want settlement failure", findings.Summary)
+	}
+	if !strings.Contains(f.log(), "CI repair push is not settled") {
+		t.Fatalf("log did not report unsettled push:\n%s", f.log())
+	}
+}
+
+func TestCIStep_PublishRepairFailsWhenAttestationCannotSettle(t *testing.T) {
+	f := newCIRepairFixture(t, false, writeCIFix)
+	bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
+	if err := os.WriteFile(bodyFile, []byte(compliantPipelineBody(t, f.headSHA)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.sctx.Repo.UpstreamURL = "https://github.com/test/repo.git"
+	f.sctx.Env = append(fakeCIGH(t, "OPEN", `[{"name":"test","state":"FAILURE","bucket":"fail"}]`),
+		"FAKE_CLI_PR_BODY_FILE="+bodyFile,
+		"FAKE_CLI_PR_TITLE=fix: ci",
+		"FAKE_CLI_PR_EDIT_ERR=provider unavailable",
+	)
+	f.sctx.Ctx = context.Background()
+	writeCIFix(f.dir)
+
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+	if err == nil || !strings.Contains(err.Error(), "failed after 3 attempts") {
+		t.Fatalf("commitRepair error = %v, want unsettled attestation failure", err)
+	}
+	if repair.HeadAdvanced {
+		t.Fatalf("repair = %+v, must not report a successfully settled repair", repair)
+	}
+	newHead := f.localHead(t)
+	if newHead == f.headSHA {
+		t.Fatal("expected the repair push to advance before settlement failed")
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := runVerifyPy(t, string(body), newHead); got != "failure" {
+		t.Fatal("failed PR edit unexpectedly settled the attestation")
 	}
 }
 

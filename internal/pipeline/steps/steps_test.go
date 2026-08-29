@@ -426,6 +426,10 @@ func fakeGHHandlePRContentCommands(args []string, joined string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr edit") {
+		if editErr := os.Getenv("FAKE_CLI_PR_EDIT_ERR"); editErr != "" {
+			fmt.Fprintln(os.Stderr, editErr)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 }
