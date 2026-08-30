@@ -101,7 +101,12 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 			findings_json = NULL, error = NULL, started_at = NULL,
 			completed_at = NULL, last_activity_at = NULL, last_activity = NULL,
 			agent_pid = NULL, auto_fix_limit = NULL
-		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
+		WHERE run_id = ? AND CASE step_name
+			WHEN 'intent' THEN 1 WHEN 'rebase' THEN 2 WHEN 'review' THEN 3
+			WHEN 'test' THEN 4 WHEN 'proof' THEN 5 WHEN 'proof-review' THEN 6
+			WHEN 'document' THEN 7 WHEN 'lint' THEN 8 WHEN 'push' THEN 9
+			WHEN 'pr' THEN 10 WHEN 'ci' THEN 11 ELSE step_order END >= ?
+			AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
 	if err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
 	}
