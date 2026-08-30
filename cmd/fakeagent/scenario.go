@@ -102,12 +102,28 @@ func defaultScenario() *Scenario {
 // prompt. An empty Match matches everything, so a single trailing entry
 // can serve as the catch-all.
 func (s *Scenario) Match(prompt string) Action {
+	var selected Action
 	for _, a := range s.Actions {
 		if a.Match == "" || strings.Contains(prompt, a.Match) {
-			return a
+			selected = a
+			break
 		}
 	}
-	return Action{Text: "no matching scenario"}
+	if selected.Match == "" && selected.Structured == nil && selected.StructuredRaw == "" && selected.Text == "" && len(selected.Edits) == 0 && len(selected.Stage) == 0 && selected.DelayMS == 0 {
+		selected = Action{Text: "no matching scenario"}
+	}
+	// E2E proof fixtures use the same strict artifact contract as production.
+	// The path is invocation-scoped, so it can point at the current run's
+	// durable evidence directory without teaching scenarios machine paths.
+	if artifact := os.Getenv("FAKEAGENT_PROOF_ARTIFACT"); artifact != "" && strings.Contains(prompt, "output-proof producer") {
+		if selected.Structured == nil {
+			selected.Structured = map[string]any{}
+		}
+		selected.Structured["tested"] = []string{"fakeagent: simulated proof artifact"}
+		selected.Structured["testing_summary"] = "simulated proof artifact inspected"
+		selected.Structured["artifacts"] = []any{map[string]any{"kind": "log", "label": "E2E proof artifact", "path": artifact}}
+	}
+	return selected
 }
 
 // applyEdits mutates files under CWD (which is the worktree no-mistakes

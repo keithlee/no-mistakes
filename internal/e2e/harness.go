@@ -168,6 +168,15 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	// Disable background update checks so helper processes do not write
 	// update-check.json while testing.T is removing the temp directory.
 	t.Setenv("NO_MISTAKES_NO_UPDATE_CHECK", "1")
+	// The proof gates are mandatory in production. E2E fixtures provide a
+	// local operator guidance snapshot and a deterministic durable artifact so
+	// ordinary journey scenarios exercise the complete eleven-step pipeline.
+	guidancePath := filepath.Join(h.NMHome, "e2e-proof-guidance.md")
+	if err := os.WriteFile(guidancePath, []byte("E2E operator proof guidance: inspect the durable fixture artifact.\n"), 0o600); err != nil {
+		t.Fatalf("write e2e proof guidance: %v", err)
+	}
+	t.Setenv("NM_E2E_PROOF_FIXTURE", "1")
+	t.Setenv("NM_E2E_PROOF_GUIDANCE", guidancePath)
 
 	h.writeGlobalConfig()
 	h.initGitRepos()
@@ -211,7 +220,7 @@ func (h *Harness) writeGlobalConfig() {
 	binLink := filepath.Join(h.BinDir, h.agentName)
 	cfg := fmt.Sprintf(`agent: %s
 log_level: debug
-agent_path_override:
+	agent_path_override:
   %s: %s
 auto_fix:
   rebase: 0
@@ -221,6 +230,7 @@ auto_fix:
   document: 0
   ci: 0
 `, h.agentName, h.agentName, binLink)
+	cfg += "proof:\n  guidance_files:\n    - " + shellQuote(os.Getenv("NM_E2E_PROOF_GUIDANCE")) + "\n"
 	if extra := strings.TrimSpace(h.globalConfigExtra); extra != "" {
 		cfg += extra + "\n"
 	}

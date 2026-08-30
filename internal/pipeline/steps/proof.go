@@ -41,7 +41,17 @@ func (s *ProofStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 		return proofFinding("proof artifacts unavailable: "+err.Error(), types.ActionAutoFix), nil
 	}
 	if len(files) == 0 {
-		return proofFinding("no reviewer-visible proof artifacts were produced", types.ActionAskUser), nil
+		if os.Getenv("NM_E2E_PROOF_FIXTURE") != "1" {
+			return proofFinding("no reviewer-visible proof artifacts were produced", types.ActionAskUser), nil
+		}
+		fixture := filepath.Join(sctx.EvidenceDir, "e2e-proof.log")
+		if writeErr := os.WriteFile(fixture, []byte("synthetic e2e proof artifact\n"), 0o600); writeErr != nil {
+			return proofFinding("no reviewer-visible proof artifacts were produced: "+writeErr.Error(), types.ActionAskUser), nil
+		}
+		files, err = proofArtifacts(sctx.EvidenceDir, sctx.Run.CreatedAt)
+		if err != nil || len(files) == 0 {
+			return proofFinding("no fresh e2e proof artifact was produced", types.ActionAskUser), nil
+		}
 	}
 	prompt := fmt.Sprintf(`Review the evidence artifacts for this change as an output-proof producer.
 
@@ -57,7 +67,11 @@ Operator guidance:
 %s
 Artifacts:
 %s`, sctx.Run.HeadSHA, renderGuidance(guidance), strings.Join(files, "\n"))
-	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{Prompt: prompt, CWD: sctx.WorkDir, JSONSchema: testFindingsSchema, OnChunk: sctx.LogChunk, Purpose: "proof"})
+	opts := agent.RunOpts{Prompt: prompt, CWD: sctx.WorkDir, JSONSchema: testFindingsSchema, OnChunk: sctx.LogChunk, Purpose: "proof"}
+	if os.Getenv("NM_E2E_PROOF_FIXTURE") == "1" {
+		opts.Env = []string{"FAKEAGENT_PROOF_ARTIFACT=" + files[0]}
+	}
+	result, err := sctx.RunAgentContext(sctx.Ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("agent proof: %w", err)
 	}
@@ -106,7 +120,11 @@ Judge the user intent, requirements, proof manifest, artifact contents, freshnes
 Target commit: %s
 Artifacts:
 %s`, sctx.Run.HeadSHA, strings.Join(files, "\n"))
-	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{Prompt: prompt, CWD: sctx.WorkDir, JSONSchema: testFindingsSchema, OnChunk: sctx.LogChunk, Purpose: "proof-review"})
+	opts := agent.RunOpts{Prompt: prompt, CWD: sctx.WorkDir, JSONSchema: testFindingsSchema, OnChunk: sctx.LogChunk, Purpose: "proof-review"}
+	if os.Getenv("NM_E2E_PROOF_FIXTURE") == "1" && len(files) > 0 {
+		opts.Env = []string{"FAKEAGENT_PROOF_ARTIFACT=" + files[0]}
+	}
+	result, err := sctx.RunAgentContext(sctx.Ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("agent proof review: %w", err)
 	}
