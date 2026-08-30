@@ -128,16 +128,17 @@ func (s StepName) Order() int {
 	}
 }
 
-// AllSteps returns all pipeline steps in execution order.
+// AllSteps returns the mandatory pipeline steps in execution order. Proof and
+// proof-review are part of the contract for every normal run; callers that
+// render or validate the pipeline must therefore use this complete sequence.
 func AllSteps() []StepName {
-	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepProof, StepProofReview, StepDocument, StepLint, StepPush, StepPR, StepCI}
 }
 
-// AllStepsWithProof returns the complete proof-aware pipeline sequence. The
-// legacy AllSteps surface remains available for callers that intentionally use
-// the pre-proof pipeline (for example stored run compatibility).
+// AllStepsWithProof is retained as an explicit name for callers documenting
+// their proof-aware intent.
 func AllStepsWithProof() []StepName {
-	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepProof, StepProofReview, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	return AllSteps()
 }
 
 // StepStatus represents the lifecycle state of a pipeline step.

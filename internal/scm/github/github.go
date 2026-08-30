@@ -433,7 +433,7 @@ func (h *Host) getPRChecks(ctx context.Context, selector string) ([]scm.Check, e
 
 const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{name status conclusion completedAt startedAt detailsUrl} ... on StatusContext{context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
 
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved comments(first:100){nodes{databaseId body path line url createdAt author{login}}}} pageInfo{hasNextPage endCursor}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{id isResolved comments(first:100){nodes{databaseId body path line url createdAt author{login}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}`
 
 func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check, error) {
 	repo := h.repoSlug()
@@ -1202,6 +1202,7 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 	}
 
 	var comments []scm.ReviewComment
+	seenComments := make(map[string]struct{})
 	cursor := ""
 	for {
 		args := []string{"api"}
@@ -1223,7 +1224,8 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 					PullRequest *struct {
 						ReviewThreads struct {
 							Nodes []struct {
-								IsResolved bool `json:"isResolved"`
+								ID         string `json:"id"`
+								IsResolved bool   `json:"isResolved"`
 								Comments   struct {
 									Nodes []struct {
 										ID        int64     `json:"databaseId"`
@@ -1236,6 +1238,10 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 											Login string `json:"login"`
 										} `json:"author"`
 									} `json:"nodes"`
+									PageInfo struct {
+										HasNextPage bool   `json:"hasNextPage"`
+										EndCursor   string `json:"endCursor"`
+									} `json:"pageInfo"`
 								} `json:"comments"`
 							} `json:"nodes"`
 							PageInfo struct {
@@ -1268,12 +1274,17 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 				if raw.Author == nil || !isSupportedReviewBot(raw.Author.Login) {
 					continue
 				}
+				id := strconv.FormatInt(raw.ID, 10)
+				if _, seen := seenComments[id]; seen {
+					continue
+				}
+				seenComments[id] = struct{}{}
 				line := 0
 				if raw.Line != nil {
 					line = *raw.Line
 				}
 				comments = append(comments, scm.ReviewComment{
-					ID:        strconv.FormatInt(raw.ID, 10),
+					ID:        id,
 					Author:    raw.Author.Login,
 					Path:      raw.Path,
 					Line:      line,
@@ -1281,6 +1292,36 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 					CreatedAt: raw.CreatedAt,
 					URL:       raw.URL,
 				})
+			}
+			commentCursor := thread.Comments.PageInfo.EndCursor
+			commentsHasNext := thread.Comments.PageInfo.HasNextPage
+			for commentsHasNext {
+				if thread.ID == "" || commentCursor == "" {
+					return nil, errors.New("PR review comments response returned an invalid nested comment cursor")
+				}
+				more, next, hasNext, fetchErr := h.getFeedbackThreadComments(ctx, thread.ID, commentCursor)
+				if fetchErr != nil {
+					return nil, fetchErr
+				}
+				for _, raw := range more {
+					if raw.Author == nil || !isSupportedReviewBot(raw.Author.Login) {
+						continue
+					}
+					id := strconv.FormatInt(raw.ID, 10)
+					if _, seen := seenComments[id]; seen {
+						continue
+					}
+					seenComments[id] = struct{}{}
+					line := 0
+					if raw.Line != nil {
+						line = *raw.Line
+					}
+					comments = append(comments, scm.ReviewComment{ID: id, Author: raw.Author.Login, Path: raw.Path, Line: line, Body: raw.Body, CreatedAt: raw.CreatedAt, URL: raw.URL})
+				}
+				if hasNext && (next == "" || next == commentCursor) {
+					return nil, errors.New("PR review comments response returned a non-progressing nested comment cursor")
+				}
+				commentsHasNext, commentCursor = hasNext, next
 			}
 		}
 		if !threads.PageInfo.HasNextPage {
@@ -1337,6 +1378,7 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 	}
 
 	var snapshot scm.FeedbackSnapshot
+	seenItems := make(map[string]struct{})
 	cursor := ""
 	reviewCursor := ""
 	for {
@@ -1424,15 +1466,23 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 		pull := response.Data.Repository.PullRequest
 		if snapshot.HeadSHA == "" {
 			snapshot.HeadSHA, snapshot.ReviewDecision = pull.HeadRefOID, pull.ReviewDecision
-			if pull.Author != nil {
-				snapshot.PRAuthor = pull.Author.Login
+			if pull.Author == nil || strings.TrimSpace(pull.Author.Login) == "" {
+				return scm.FeedbackSnapshot{}, errors.New("GitHub feedback response omitted the pull request author")
 			}
+			snapshot.PRAuthor = pull.Author.Login
+		} else if strings.TrimSpace(pull.HeadRefOID) != snapshot.HeadSHA {
+			return scm.FeedbackSnapshot{}, fmt.Errorf("GitHub feedback head changed while paginating: %s -> %s", snapshot.HeadSHA, pull.HeadRefOID)
 		}
 		for _, review := range pull.Reviews.Nodes {
 			if review.Author == nil || strings.TrimSpace(review.State) == "PENDING" {
 				continue
 			}
-			snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(review.ID, 10), Kind: scm.FeedbackReview, ReviewState: review.State, Author: review.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(review.Author.Login), "[bot]"), Body: review.Body, CreatedAt: review.SubmittedAt})
+			id := strconv.FormatInt(review.ID, 10)
+			if _, seen := seenItems[id]; seen {
+				continue
+			}
+			seenItems[id] = struct{}{}
+			snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: id, Kind: scm.FeedbackReview, ReviewState: review.State, Author: review.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(review.Author.Login), "[bot]"), Body: review.Body, CreatedAt: review.SubmittedAt})
 		}
 		for _, thread := range pull.ReviewThreads.Nodes {
 			comments := thread.Comments.Nodes
@@ -1442,11 +1492,16 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 				if comment.Author == nil {
 					continue
 				}
+				id := strconv.FormatInt(comment.ID, 10)
+				if _, seen := seenItems[id]; seen {
+					continue
+				}
+				seenItems[id] = struct{}{}
 				line := 0
 				if comment.Line != nil {
 					line = *comment.Line
 				}
-				snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(comment.ID, 10), ThreadID: thread.ID, Kind: scm.FeedbackInlineReview, URL: comment.URL, Author: comment.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(comment.Author.Login), "[bot]"), Body: comment.Body, Path: comment.Path, Line: line, CreatedAt: comment.CreatedAt, Resolved: thread.IsResolved})
+				snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: id, ThreadID: thread.ID, Kind: scm.FeedbackInlineReview, URL: comment.URL, Author: comment.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(comment.Author.Login), "[bot]"), Body: comment.Body, Path: comment.Path, Line: line, CreatedAt: comment.CreatedAt, Resolved: thread.IsResolved})
 			}
 			for commentsHasNext {
 				if commentCursor == "" {
@@ -1460,13 +1515,21 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 					if comment.Author == nil {
 						continue
 					}
+					id := strconv.FormatInt(comment.ID, 10)
+					if _, seen := seenItems[id]; seen {
+						continue
+					}
+					seenItems[id] = struct{}{}
 					line := 0
 					if comment.Line != nil {
 						line = *comment.Line
 					}
-					snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: strconv.FormatInt(comment.ID, 10), ThreadID: thread.ID, Kind: scm.FeedbackInlineReview, URL: comment.URL, Author: comment.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(comment.Author.Login), "[bot]"), Body: comment.Body, Path: comment.Path, Line: line, CreatedAt: comment.CreatedAt, Resolved: thread.IsResolved})
+					snapshot.Items = append(snapshot.Items, scm.FeedbackItem{ID: id, ThreadID: thread.ID, Kind: scm.FeedbackInlineReview, URL: comment.URL, Author: comment.Author.Login, AuthorIsBot: strings.HasSuffix(strings.ToLower(comment.Author.Login), "[bot]"), Body: comment.Body, Path: comment.Path, Line: line, CreatedAt: comment.CreatedAt, Resolved: thread.IsResolved})
 				}
 				commentsHasNext = hasNext
+				if commentsHasNext && (next == "" || next == commentCursor) {
+					return scm.FeedbackSnapshot{}, errors.New("GitHub feedback response returned a non-progressing nested comment cursor")
+				}
 				commentCursor = next
 			}
 		}
@@ -1491,7 +1554,13 @@ func (h *Host) GetFeedback(ctx context.Context, pr *scm.PR) (scm.FeedbackSnapsho
 	if err != nil {
 		return scm.FeedbackSnapshot{}, err
 	}
-	snapshot.Items = append(snapshot.Items, issueItems...)
+	for _, item := range issueItems {
+		if _, seen := seenItems[item.ID]; seen {
+			continue
+		}
+		seenItems[item.ID] = struct{}{}
+		snapshot.Items = append(snapshot.Items, item)
+	}
 	return snapshot, nil
 }
 

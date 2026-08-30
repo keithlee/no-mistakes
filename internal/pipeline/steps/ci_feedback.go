@@ -174,7 +174,14 @@ func (s *CIStep) publishValidatedFeedback(sctx *pipeline.StepContext, host scm.H
 				return feedbackGate("validated feedback reply failed; disposition remains blocked", action.Item), nil
 			}
 			resolution, _ := s.feedbackReconciler.Disposition(action.Item.ID, sctx.Run.HeadSHA, true)
-			if persistErr := s.persistFeedback(sctx); persistErr != nil {
+			if resolution.Action == feedback.NoAction && sctx.DB != nil {
+				// A top-level disposition is complete once the provider accepts the
+				// marker. Retire its durable reservation before returning so a
+				// daemon restart cannot replay the reply.
+				if err := sctx.DB.DeleteFeedbackRecord(sctx.Run.ID, action.Item.ID); err != nil {
+					return feedbackGate("feedback reconciliation ledger retirement failed", action.Item), nil
+				}
+			} else if persistErr := s.persistFeedback(sctx); persistErr != nil {
 				return feedbackGate("feedback reconciliation ledger write failed", action.Item), nil
 			}
 			if resolution.Action != feedback.Resolve {
