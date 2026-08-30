@@ -101,10 +101,10 @@ func TestTestEvidenceLivesUnderAppRootNotSharedTemp(t *testing.T) {
 }
 
 // TestRunCleanupLeavesNoEmptyEvidenceDirectory is the litter half of the fix,
-// end to end. This scenario's agent reports no artifacts, so the run's evidence
-// directory is created and then left empty - which before the fix meant one
-// permanent directory per run forever. On a real machine 823 of 876 accumulated
-// directories were exactly this.
+// end to end. The strict proof fixture records one durable artifact, so the
+// run's evidence directory remains useful rather than becoming an unexplained
+// empty directory. Missing proof is a blocking gate and cannot be used to
+// manufacture a completed run.
 func TestRunCleanupLeavesNoEmptyEvidenceDirectory(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
 	if out, err := h.Run("init"); err != nil {
@@ -121,18 +121,8 @@ func TestRunCleanupLeavesNoEmptyEvidenceDirectory(t *testing.T) {
 	}
 
 	runDir := filepath.Join(h.NMHome, "evidence", run.ID)
-	// Cleanup runs in the run goroutine's defer, just after the status the
-	// wait above observed, so give it a moment to land.
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		_, err := os.Stat(runDir)
-		if os.IsNotExist(err) {
-			return
-		}
-		if time.Now().After(deadline) {
-			entries, readErr := os.ReadDir(runDir)
-			t.Fatalf("empty evidence directory %s survived the run (entries=%v, readErr=%v)", runDir, entries, readErr)
-		}
-		time.Sleep(250 * time.Millisecond)
+	artifact := filepath.Join(runDir, "e2e-proof.log")
+	if info, err := os.Stat(artifact); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("strict proof fixture did not leave durable artifact %s: %v", artifact, err)
 	}
 }

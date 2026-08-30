@@ -115,7 +115,7 @@ func (s *Scenario) Match(prompt string) Action {
 	// E2E proof fixtures use the same strict artifact contract as production.
 	// The path is invocation-scoped, so it can point at the current run's
 	// durable evidence directory without teaching scenarios machine paths.
-	if artifact := os.Getenv("FAKEAGENT_PROOF_ARTIFACT"); artifact != "" && strings.Contains(prompt, "output-proof producer") {
+	if artifact := os.Getenv("FAKEAGENT_PROOF_ARTIFACT"); artifact != "" && (strings.Contains(prompt, "output-proof producer") || strings.Contains(prompt, "acceptance review of the proof")) {
 		if selected.Structured == nil {
 			selected.Structured = map[string]any{}
 		}

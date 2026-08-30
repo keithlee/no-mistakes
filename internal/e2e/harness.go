@@ -220,7 +220,7 @@ func (h *Harness) writeGlobalConfig() {
 	binLink := filepath.Join(h.BinDir, h.agentName)
 	cfg := fmt.Sprintf(`agent: %s
 log_level: debug
-	agent_path_override:
+agent_path_override:
   %s: %s
 auto_fix:
   rebase: 0
