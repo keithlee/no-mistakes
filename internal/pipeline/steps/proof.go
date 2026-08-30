@@ -36,6 +36,12 @@ func (s *ProofStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 	if err != nil {
 		return proofFinding("proof guidance unavailable: "+err.Error(), types.ActionAskUser), nil
 	}
+	// Test creates the run evidence directory when it invokes its evidence
+	// producer. Configured test commands can legitimately skip that producer,
+	// so Proof owns creation of the durable root before inspecting it.
+	if err := os.MkdirAll(sctx.EvidenceDir, 0o755); err != nil {
+		return proofFinding("proof evidence directory unavailable: "+err.Error(), types.ActionAskUser), nil
+	}
 	files, err := proofArtifacts(sctx.EvidenceDir, sctx.Run.CreatedAt)
 	if err != nil {
 		return proofFinding("proof artifacts unavailable: "+err.Error(), types.ActionAutoFix), nil
@@ -105,6 +111,9 @@ func (s *ProofReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOut
 	}
 	if _, err := proofpkg.SnapshotGuidance(proofGuidanceFiles(sctx)); err != nil {
 		return proofFinding("proof guidance unavailable: "+err.Error(), types.ActionAskUser), nil
+	}
+	if err := os.MkdirAll(sctx.EvidenceDir, 0o755); err != nil {
+		return proofFinding("proof review evidence directory unavailable: "+err.Error(), types.ActionAskUser), nil
 	}
 	files, err := proofArtifacts(sctx.EvidenceDir, sctx.Run.CreatedAt)
 	if err != nil {
