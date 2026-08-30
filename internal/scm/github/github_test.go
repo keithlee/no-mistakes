@@ -1026,6 +1026,39 @@ func TestGetChecksTargetsKnownPRByURLWhenNumberMissing(t *testing.T) {
 	}
 }
 
+func TestGetFeedbackReadsAllGitHubReviewSurfaces(t *testing.T) {
+	t.Parallel()
+	graphqlKey := strings.Join([]string{"gh", "api", "graphql", "-f", "query=" + feedbackSnapshotQuery, "-F", "owner=test", "-F", "name=repo", "-F", "number=123"}, " ")
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		graphqlKey: {stdout: `{"data":{"viewer":{"login":"author"},"repository":{"pullRequest":{"headRefOid":"deadbeef","author":{"login":"author"},"reviewDecision":"CHANGES_REQUESTED","reviews":{"nodes":[{"databaseId":11,"body":"please revise","state":"CHANGES_REQUESTED","submittedAt":"2026-08-30T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasNextPage":false,"endCursor":""}},"reviewThreads":{"nodes":[{"id":"thread-1","isResolved":false,"comments":{"nodes":[{"databaseId":22,"body":"fix this line","path":"main.go","url":"https://example/comment/22","line":7,"createdAt":"2026-08-30T00:01:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasNextPage":false,"endCursor":""}}}],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}`},
+		"gh api repos/test/repo/issues/123/comments --paginate --slurp":      {stdout: `[[{"id":33,"body":"also update the docs","html_url":"https://example/comment/33","created_at":"2026-08-30T00:02:00Z","user":{"login":"another-reviewer","type":"User"}}]]`},
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+	}), nil, "", "test/repo")
+	snapshot, err := host.GetFeedback(context.Background(), &scm.PR{Number: "123"})
+	if err != nil {
+		t.Fatalf("GetFeedback() error = %v", err)
+	}
+	if snapshot.HeadSHA != "deadbeef" || snapshot.PRAuthor != "author" || len(snapshot.Items) != 3 {
+		t.Fatalf("feedback snapshot = %+v", snapshot)
+	}
+	if snapshot.Items[0].Kind != scm.FeedbackReview || snapshot.Items[1].ThreadID != "thread-1" || snapshot.Items[2].Kind != scm.FeedbackIssueComment {
+		t.Fatalf("feedback items = %+v", snapshot.Items)
+	}
+}
+
+func TestReplyToInlineFeedbackUsesPullRequestReplyEndpoint(t *testing.T) {
+	t.Parallel()
+	var recorded [][]string
+	host := New(recordingCmdFactory("{}\n", &recorded), nil, "", "test/repo")
+	err := host.ReplyToFeedback(context.Background(), &scm.PR{Number: "123"}, scm.FeedbackItem{ID: "comment:456", Kind: scm.FeedbackInlineReview}, "validated")
+	if err != nil {
+		t.Fatalf("ReplyToFeedback() error = %v", err)
+	}
+	if len(recorded) != 1 || !strings.Contains(strings.Join(recorded[0], " "), "repos/test/repo/pulls/123/comments/456/replies") {
+		t.Fatalf("inline reply used wrong endpoint: %v", recorded)
+	}
+}
+
 // Compare with the proven explicit-PR invocation: when the number is known it is
 // passed verbatim as the selector, exactly as before.
 func TestGetChecksTargetsKnownPRByNumber(t *testing.T) {

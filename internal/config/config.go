@@ -564,6 +564,10 @@ type Config struct {
 	// intentionally has no CI (see the RepoConfig field). When true and the
 	// forge reports zero checks, the CI monitor treats that as all-checks-passed.
 	NoCI bool
+	// StrictHandoff enables this fork's current-head proof and complete GitHub
+	// feedback gates. Merge sets it for every real resolved configuration;
+	// direct Config literals keep it false so embeddings must opt in explicitly.
+	StrictHandoff bool
 }
 
 // PR is the resolved pull-request configuration.
@@ -2587,6 +2591,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,
 		NoCI:                   repo.NoCI,
+		StrictHandoff:          true,
 	}
 
 	if repo.Agent != "" {

@@ -2,9 +2,11 @@ package scm
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -199,6 +201,7 @@ type Capabilities struct {
 	FailedCheckLogs bool
 	MergedProof     bool
 	ReviewComments  bool
+	Feedback        bool
 }
 
 var (
@@ -221,6 +224,115 @@ type ReviewComment struct {
 	Body      string
 	CreatedAt time.Time
 	URL       string
+}
+
+// FeedbackKind identifies the GitHub surface that produced a feedback item.
+type FeedbackKind string
+
+const (
+	FeedbackInlineReview FeedbackKind = "inline_review"
+	FeedbackReview       FeedbackKind = "review"
+	FeedbackIssueComment FeedbackKind = "issue_comment"
+)
+
+// FeedbackItem is one review item tied to a pull request. Body is untrusted
+// external data and must only be passed to agents inside explicit delimiters.
+type FeedbackItem struct {
+	ID          string
+	ThreadID    string
+	URL         string
+	Kind        FeedbackKind
+	ReviewState string
+	Author      string
+	Body        string
+	Path        string
+	Line        int
+	CreatedAt   time.Time
+	Resolved    bool
+	AuthorIsBot bool
+}
+
+// FeedbackSnapshot is a complete GitHub feedback read bound to one PR head.
+type FeedbackSnapshot struct {
+	HeadSHA        string
+	PRAuthor       string
+	ViewerLogin    string
+	ReviewDecision string
+	Items          []FeedbackItem
+}
+
+// FeedbackHost exposes every GitHub review surface used by the handoff gate.
+type FeedbackHost interface {
+	GetFeedback(ctx context.Context, pr *PR) (FeedbackSnapshot, error)
+}
+
+// FeedbackActionsHost performs the provider writes that finish reconciliation.
+type FeedbackActionsHost interface {
+	ReplyToFeedback(ctx context.Context, pr *PR, item FeedbackItem, body string) error
+	ResolveFeedback(ctx context.Context, pr *PR, item FeedbackItem) error
+}
+
+// FeedbackPolicy determines which external items must be addressed.
+type FeedbackPolicy struct {
+	PRAuthor          string
+	BotAuthorPatterns []string
+	IncludeBots       bool
+}
+
+func (p FeedbackPolicy) InScope(item FeedbackItem) bool {
+	if item.Kind == FeedbackReview && strings.TrimSpace(item.Body) == "" {
+		return false
+	}
+	author := strings.TrimSpace(item.Author)
+	if author == "" || strings.EqualFold(author, strings.TrimSpace(p.PRAuthor)) {
+		return false
+	}
+	if !item.AuthorIsBot {
+		return true
+	}
+	if !p.IncludeBots {
+		return false
+	}
+	for _, pattern := range p.BotAuthorPatterns {
+		if ok, _ := path.Match(strings.ToLower(pattern), strings.ToLower(author)); ok {
+			return true
+		}
+	}
+	return false
+}
+
+const dispositionMarkerPrefix = "<!-- no-mistakes: feedback-disposition "
+
+// FeedbackDispositionMarker binds a response to its source item and validated head.
+func FeedbackDispositionMarker(sourceID, headSHA, disposition string) string {
+	encode := func(v string) string { return base64.RawURLEncoding.EncodeToString([]byte(strings.TrimSpace(v))) }
+	return dispositionMarkerPrefix + encode(sourceID) + " " + encode(headSHA) + " " + encode(disposition) + " -->"
+}
+
+// ParseFeedbackDispositionMarker accepts only markers emitted above.
+func ParseFeedbackDispositionMarker(body string) (sourceID, headSHA, disposition string, ok bool) {
+	start := strings.Index(body, dispositionMarkerPrefix)
+	if start < 0 {
+		return "", "", "", false
+	}
+	remainder := body[start+len(dispositionMarkerPrefix):]
+	end := strings.Index(remainder, " -->")
+	if end < 0 {
+		return "", "", "", false
+	}
+	fields := strings.Fields(remainder[:end])
+	if len(fields) != 3 {
+		return "", "", "", false
+	}
+	decoded := make([]string, 3)
+	for i, field := range fields {
+		value, err := base64.RawURLEncoding.DecodeString(field)
+		if err != nil || strings.TrimSpace(string(value)) == "" {
+			return "", "", "", false
+		}
+		decoded[i] = string(value)
+	}
+	return decoded[0], decoded[1], decoded[2], true
 }
 
 // ReviewCommentsHost is an optional interface for SCM hosts that support fetching

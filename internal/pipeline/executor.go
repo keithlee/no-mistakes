@@ -459,6 +459,31 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
 	case types.ActionApprove:
+		if gate.step.Name() == types.StepCI && e.config != nil && e.config.StrictHandoff {
+			if dbErr := e.db.UpdateStepStatus(gate.stepResult.ID, types.StepStatusRunning); dbErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("resume strict CI gate: %w", dbErr), ctx)
+			}
+			skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{
+				roundNum:        gate.round,
+				autoFixAttempts: gate.autoFixes,
+				executionMS:     duration,
+				currentRoundID:  gate.lastRoundID,
+			})
+			if err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			if restartFrom != "" {
+				restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, gate.index)
+				if indexErr != nil {
+					return e.failRun(run, repo, indexErr, ctx)
+				}
+				return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
+			}
+			if skipRemaining {
+				return e.skipRecoveredRemainder(run, repo, gate.index+1)
+			}
+			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+		}
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := completeRecoveredGate(); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err), ctx)
@@ -466,6 +491,31 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
 	case types.ActionSkip:
+		if gate.step.Name() == types.StepCI && e.config != nil && e.config.StrictHandoff {
+			if dbErr := e.db.UpdateStepStatus(gate.stepResult.ID, types.StepStatusRunning); dbErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("resume strict CI gate: %w", dbErr), ctx)
+			}
+			skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{
+				roundNum:        gate.round,
+				autoFixAttempts: gate.autoFixes,
+				executionMS:     duration,
+				currentRoundID:  gate.lastRoundID,
+			})
+			if err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			if restartFrom != "" {
+				restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, gate.index)
+				if indexErr != nil {
+					return e.failRun(run, repo, indexErr, ctx)
+				}
+				return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
+			}
+			if skipRemaining {
+				return e.skipRecoveredRemainder(run, repo, gate.index+1)
+			}
+			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+		}
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
@@ -1058,6 +1108,19 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 		switch response.action {
 		case types.ActionApprove:
+			if stepName == types.StepCI && e.config != nil && e.config.StrictHandoff {
+				// This gate represents live evidence, not a policy waiver. Re-run
+				// it so approval cannot manufacture checks-passed from stale proof
+				// or unresolved feedback.
+				phaseStart = time.Now()
+				sctx.Fixing = false
+				sctx.PreviousFindings = ""
+				nextTrigger = "initial"
+				if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusRunning); dbErr != nil {
+					return false, "", fmt.Errorf("resume strict CI gate: %w", dbErr)
+				}
+				continue
+			}
 			// Approved - execution already frozen in executionMS, reset phaseStart
 			// so the done label computes no additional elapsed.
 			e.recordDeclinedRound(currentRoundID, outcome.Findings, stepName, roundNum)
@@ -1065,6 +1128,16 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			goto done
 
 		case types.ActionSkip:
+			if stepName == types.StepCI && e.config != nil && e.config.StrictHandoff {
+				phaseStart = time.Now()
+				sctx.Fixing = false
+				sctx.PreviousFindings = ""
+				nextTrigger = "initial"
+				if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusRunning); dbErr != nil {
+					return false, "", fmt.Errorf("resume strict CI gate: %w", dbErr)
+				}
+				continue
+			}
 			// Skip - mark step skipped and return (not an error)
 			e.recordDeclinedRound(currentRoundID, outcome.Findings, stepName, roundNum)
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {

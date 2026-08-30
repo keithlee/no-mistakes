@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/feedback"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -50,6 +51,13 @@ type CIStep struct {
 	// must not re-arm the timeout. Overridable for testing; defaults to
 	// fetching the upstream default branch.
 	baseBranchTip func(context.Context) (string, bool)
+
+	feedbackReconciler *feedback.Reconciler
+	feedbackDecisions  map[string]feedback.Decision
+	feedbackLoaded     bool
+	feedbackPrompt     string
+	proofReviewedHead  string
+	proofSkillPath     string
 }
 
 // SetPollIntervalOverride is a test hook; production leaves the override unset.
@@ -386,6 +394,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 		}
 
+		if sctx.Config != nil && sctx.Config.StrictHandoff && host.Capabilities().Feedback {
+			outcome, err := s.reconcileFeedback(sctx, host, pr)
+			if err != nil || outcome != nil {
+				return outcome, err
+			}
+		}
+
 		// Check mergeable state if the provider supports it
 		mergeConflict := false
 		mergeabilityKnown := true
@@ -675,14 +690,30 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// is common and must never look green. Elapsed time is not
 					// evidence; there is no grace-period promotion path.
 					if sctx.Config != nil && sctx.Config.NoCI {
-						lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
+						outcome, ready, gateErr := s.finalizeHandoff(sctx, host, pr)
+						if gateErr != nil || outcome != nil {
+							return outcome, gateErr
+						}
+						if ready {
+							lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
+						} else {
+							lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+						}
 					} else {
 						clearCIMonitorReady(sctx)
 						lastMonitorLog = ""
 						sctx.Log("no CI checks reported yet, waiting for checks to register...")
 					}
 				case allChecksPassed(checks):
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+					outcome, ready, gateErr := s.finalizeHandoff(sctx, host, pr)
+					if gateErr != nil || outcome != nil {
+						return outcome, gateErr
+					}
+					if ready {
+						lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+					} else {
+						lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+					}
 				default:
 					clearCIMonitorReady(sctx)
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)

@@ -213,7 +213,9 @@ Run the pipeline and decide on its findings as they come up:
       awaiting approval. You rarely need this; omit it to answer the active gate.
 3. Repeat step 2 until the output has an `outcome:` instead of a `gate:`. The
    outcomes are:
-   - `checks-passed` - the change is validated and CI is green (or the
+   - `checks-passed` - the change is validated, the current-head rigorous
+     output proof review passed, every actionable GitHub PR comment was
+     addressed or escalated, and CI is green (or the
      trusted default-branch config declares `no_ci: true` and no checks are
      registered - the help line names that declaration when it applies), but
      the PR is not merged yet. **You are done driving the pipeline.** Do not
@@ -247,7 +249,9 @@ After synchronization, commit the follow-up on top and re-run `no-mistakes axi r
 This preserves every prior gate-fix commit regardless of its configured subject.
 
 The CI step deliberately keeps watching the PR after checks pass, so
-`axi run` returns `checks-passed` the moment checks are green (or a trusted
+`axi run` returns `checks-passed` after checks are green, the
+current-head rigorous output proof review passes, and every actionable GitHub
+PR comment is addressed or escalated (or a trusted
 `no_ci: true` declaration covers a zero-check repository) rather than
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
 Never treat "no CI checks reported" alone as green.
