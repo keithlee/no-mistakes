@@ -3,12 +3,16 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	toon "github.com/toon-format/toon-go"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
@@ -58,8 +62,35 @@ func runAxiPRReadiness(cmd *cobra.Command, prURL, expectedHead, phase string) er
 	}
 	repo := github.RepoSlug(prURL)
 	hostName := scm.ExtractHost(prURL)
+	// Readiness must use the same isolated forge profile as the daemon. Resolve
+	// it from trusted global config before constructing any provider command;
+	// never let ambient GH_CONFIG_DIR or login state choose the account.
+	var forgeEnv []string
+	if env, envErr := openAxiEnv(false); envErr == nil {
+		defer env.close()
+		if env.cfg != nil && len(env.cfg.ForgeProfiles) > 0 {
+			upstream := prURL
+			fork := ""
+			if env.repo != nil {
+				upstream, fork = env.repo.UpstreamURL, env.repo.ForkURL
+			}
+			resolved, resolveErr := forgecontext.Resolve(cmd.Context(), env.cfg.ForgeProfiles, upstream, fork)
+			if resolveErr != nil {
+				result := scm.EvaluatePRReadiness(scm.ReadinessInput{Phase: readinessPhase, ExpectedHead: expectedHead, ProviderSupported: true, StateReadable: false})
+				result.Reason = "forge profile is unreadable: " + resolveErr.Error()
+				return emitReadiness(cmd, prURL, readinessPhase, result)
+			}
+			if resolved != nil {
+				forgeEnv = resolved.Environment.Apply(nil)
+			}
+		}
+	}
 	host := github.New(func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, name, args...)
+		command := exec.CommandContext(ctx, name, args...)
+		if forgeEnv != nil {
+			command.Env = forgeEnv
+		}
+		return command
 	}, func() bool { _, err := exec.LookPath("gh"); return err == nil }, hostName, repo)
 	pr := &scm.PR{URL: prURL, HeadSHA: expectedHead}
 	snapshot, err := host.GetFeedback(cmd.Context(), pr)
@@ -80,6 +111,12 @@ func runAxiPRReadiness(cmd *cobra.Command, prURL, expectedHead, phase string) er
 		return emitReadiness(cmd, prURL, readinessPhase, result)
 	}
 	ciReady := len(checks) > 0
+	if len(checks) == 0 {
+		// An empty check rollup is acceptable only when the repository's
+		// trusted default-branch config explicitly declares no_ci: true.
+		// Never read the checked-out feature branch for this decision.
+		ciReady = trustedNoCI(envRepoForReadiness(prURL))
+	}
 	for _, check := range checks {
 		if check.Bucket != scm.CheckBucketPass && check.Bucket != scm.CheckBucketSkip {
 			ciReady = false
@@ -107,6 +144,28 @@ func runAxiPRReadiness(cmd *cobra.Command, prURL, expectedHead, phase string) er
 	}
 	result := scm.EvaluatePRReadiness(scm.ReadinessInput{Phase: readinessPhase, ExpectedHead: expectedHead, CurrentHead: snapshot.HeadSHA, CIReady: ciReady, ProofReviewPassed: proofReviewForCurrentHead(prURL, expectedHead), ReviewDecision: snapshot.ReviewDecision, UnresolvedIDs: unresolvedIDs, UnresolvedURLs: unresolvedURLs, ProviderSupported: true, StateReadable: true})
 	return emitReadiness(cmd, prURL, readinessPhase, result)
+}
+
+func envRepoForReadiness(prURL string) *db.Repo {
+	env, err := openAxiEnv(false)
+	if err != nil {
+		return nil
+	}
+	defer env.close()
+	return env.repo
+}
+
+func trustedNoCI(repo *db.Repo) bool {
+	if repo == nil || strings.TrimSpace(repo.WorkingPath) == "" || strings.TrimSpace(repo.DefaultBranch) == "" {
+		return false
+	}
+	ref := repo.DefaultBranch + ":.no-mistakes.yaml"
+	data, err := exec.Command("git", "-C", repo.WorkingPath, "show", ref).Output()
+	if err != nil {
+		return false
+	}
+	cfg, err := config.LoadRepoFromBytes(data)
+	return err == nil && cfg != nil && cfg.NoCI
 }
 
 func markerAddresses(item scm.FeedbackItem, all []scm.FeedbackItem, prAuthor, head string) bool {
@@ -150,10 +209,39 @@ func proofReviewForCurrentHead(prURL, head string) bool {
 		if err != nil {
 			return false
 		}
+		proofAccepted := false
+		proofArtifacts := []types.TestArtifact(nil)
 		for _, step := range steps {
-			if step.StepName == types.StepProofReview && step.Status == types.StepStatusCompleted {
-				return true
+			if step.StepName == types.StepProof && step.Status == types.StepStatusCompleted && step.FindingsJSON != nil {
+				findings, parseErr := types.ParseFindingsJSON(*step.FindingsJSON)
+				if parseErr != nil || len(findings.Artifacts) == 0 {
+					return false
+				}
+				proofArtifacts = findings.Artifacts
 			}
+			if step.StepName == types.StepProofReview && step.Status == types.StepStatusCompleted {
+				proofAccepted = true
+			}
+		}
+		if proofAccepted && len(proofArtifacts) > 0 {
+			for _, artifact := range proofArtifacts {
+				path := strings.TrimSpace(artifact.Path)
+				if path == "" {
+					return false
+				}
+				if !filepath.IsAbs(path) {
+					worktree := run.WorktreePath()
+					if worktree == "" {
+						return false
+					}
+					path = filepath.Join(worktree, filepath.Clean(path))
+				}
+				info, statErr := os.Stat(path)
+				if statErr != nil || !info.Mode().IsRegular() || (run.CreatedAt > 0 && info.ModTime().Unix() < run.CreatedAt) {
+					return false
+				}
+			}
+			return true
 		}
 	}
 	return false
