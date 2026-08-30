@@ -152,12 +152,17 @@ func (s *CIStep) persistFeedback(sctx *pipeline.StepContext) error {
 	return nil
 }
 
-func (s *CIStep) publishValidatedFeedback(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) (*pipeline.StepOutcome, error) {
+func (s *CIStep) publishValidatedFeedback(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, ciReady bool) (*pipeline.StepOutcome, error) {
 	ah, ok := host.(scm.FeedbackActionsHost)
 	if !ok || s.feedbackReconciler == nil {
 		return nil, nil
 	}
-	actions := s.feedbackReconciler.ValidationPassed(sctx.Run.HeadSHA, true, true)
+	proofReviewPassed := completedProofReviewForFeedback(sctx)
+	if !ciReady || !proofReviewPassed {
+		clearCIMonitorReady(sctx)
+		return feedbackGate("feedback disposition requires current green CI and completed proof review", scm.FeedbackItem{}), nil
+	}
+	actions := s.feedbackReconciler.ValidationPassed(sctx.Run.HeadSHA, ciReady, proofReviewPassed)
 	for _, action := range actions {
 		if action.Action == feedback.Reply {
 			body := ""
@@ -202,4 +207,46 @@ func (s *CIStep) publishValidatedFeedback(sctx *pipeline.StepContext, host scm.H
 		}
 	}
 	return nil, nil
+}
+
+func completedProofReviewForFeedback(sctx *pipeline.StepContext) bool {
+	if sctx == nil || sctx.DB == nil || sctx.Run == nil {
+		return false
+	}
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		return false
+	}
+	proof, review := false, false
+	for _, step := range steps {
+		if step == nil || step.Status != types.StepStatusCompleted {
+			continue
+		}
+		switch step.StepName {
+		case types.StepProof:
+			if step.FindingsJSON == nil {
+				return false
+			}
+			findings, parseErr := types.ParseFindingsJSON(*step.FindingsJSON)
+			if parseErr != nil || len(findings.Artifacts) == 0 || strings.TrimSpace(findings.Summary) == "" || len(findings.Tested) == 0 || strings.TrimSpace(findings.TestingSummary) == "" {
+				return false
+			}
+			for _, artifact := range findings.Artifacts {
+				if strings.TrimSpace(artifact.Path) == "" || strings.TrimSpace(artifact.SHA256) == "" || artifact.Bytes <= 0 {
+					return false
+				}
+			}
+			proof = true
+		case types.StepProofReview:
+			if step.FindingsJSON == nil {
+				return false
+			}
+			findings, parseErr := types.ParseFindingsJSON(*step.FindingsJSON)
+			if parseErr != nil || strings.TrimSpace(findings.Summary) == "" || len(findings.Items) == 0 && findings.Summary == "" {
+				return false
+			}
+			review = true
+		}
+	}
+	return proof && review
 }

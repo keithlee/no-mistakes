@@ -975,6 +975,23 @@ func TestGetChecksTargetsKnownPRByURLWhenNumberMissing(t *testing.T) {
 	}
 }
 
+func TestReplyToInlineFeedbackUsesPullRequestReplyEndpoint(t *testing.T) {
+	t.Parallel()
+	var recorded [][]string
+	host := New(recordingCmdFactory("{}\n", &recorded), nil, "", "test/repo")
+	err := host.ReplyToFeedback(context.Background(), &scm.PR{Number: "123", URL: "https://github.com/test/repo/pull/123"}, scm.FeedbackItem{ID: "456", Kind: scm.FeedbackInlineReview}, "validated")
+	if err != nil {
+		t.Fatalf("ReplyToFeedback() error = %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("expected one gh invocation, got %d: %v", len(recorded), recorded)
+	}
+	argv := strings.Join(recorded[0], " ")
+	if !strings.Contains(argv, "repos/test/repo/pulls/123/comments/456/replies") {
+		t.Fatalf("inline reply used wrong endpoint: %s", argv)
+	}
+}
+
 // Compare with the proven explicit-PR invocation: when the number is known it is
 // passed verbatim as the selector, exactly as before.
 func TestGetChecksTargetsKnownPRByNumber(t *testing.T) {

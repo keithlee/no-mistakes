@@ -112,6 +112,11 @@ type TestArtifact struct {
 	Path    string `json:"path,omitempty"`
 	URL     string `json:"url,omitempty"`
 	Content string `json:"content,omitempty"`
+	// SHA256 and Bytes bind a reviewed local artifact to the exact bytes that
+	// were inspected. They are filled by the proof producer, never trusted
+	// from agent-authored output.
+	SHA256 string `json:"sha256,omitempty"`
+	Bytes  int64  `json:"bytes,omitempty"`
 }
 
 type findingWire struct {

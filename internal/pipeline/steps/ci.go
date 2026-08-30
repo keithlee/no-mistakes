@@ -645,7 +645,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						sctx.Log("no CI checks reported yet, waiting for checks to register...")
 					}
 				case allChecksPassed(checks):
-					if outcome, feedbackErr := s.publishValidatedFeedback(sctx, host, pr); feedbackErr != nil {
+					if outcome, feedbackErr := s.publishValidatedFeedback(sctx, host, pr, allChecksPassed(checks)); feedbackErr != nil {
 						return nil, feedbackErr
 					} else if outcome != nil {
 						return outcome, nil

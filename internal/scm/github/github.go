@@ -1684,7 +1684,10 @@ func (h *Host) ReplyToFeedback(ctx context.Context, pr *scm.PR, item scm.Feedbac
 		args = append(args, "--hostname", h.host)
 	}
 	if item.Kind == scm.FeedbackInlineReview {
-		path = "repos/" + repo + "/pulls/comments/" + item.ID + "/replies"
+		if strings.TrimSpace(pr.Number) == "" {
+			return errors.New("cannot reply to inline feedback without pull request number")
+		}
+		path = "repos/" + repo + "/pulls/" + strings.TrimSpace(pr.Number) + "/comments/" + item.ID + "/replies"
 	}
 	args = append(args, path, "--method", "POST", "-f", "body="+body)
 	if out, err := h.cmd(ctx, "gh", args...).CombinedOutput(); err != nil {
