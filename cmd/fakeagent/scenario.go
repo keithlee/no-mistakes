@@ -121,7 +121,7 @@ func (s *Scenario) Match(prompt string) Action {
 		}
 		selected.Structured["tested"] = []string{"fakeagent: simulated proof artifact"}
 		selected.Structured["testing_summary"] = "simulated proof artifact inspected"
-		selected.Structured["artifacts"] = []any{map[string]any{"kind": "log", "label": "E2E proof artifact", "path": artifact}}
+		selected.Structured["artifacts"] = []any{map[string]any{"kind": "log", "label": "E2E proof artifact", "path": artifact, "url": "https://example.test/e2e-proof.log", "content": "synthetic e2e proof artifact"}}
 	}
 	return selected
 }

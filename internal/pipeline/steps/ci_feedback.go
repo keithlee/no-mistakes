@@ -144,12 +144,12 @@ func (s *CIStep) persistFeedback(sctx *pipeline.StepContext) error {
 	if sctx.DB == nil || s.feedbackReconciler == nil {
 		return nil
 	}
-	for _, record := range s.feedbackReconciler.Records() {
-		if err := sctx.DB.UpsertFeedbackRecord(db.FeedbackRecord{RunID: sctx.Run.ID, ItemID: record.Item.ID, ItemJSON: feedback.MarshalItem(record.Item), SourceHead: record.SourceHead, Attempts: record.Attempts, ValidatedHead: record.ValidatedHead, Replied: record.Replied, Repaired: record.Repaired}); err != nil {
-			return err
-		}
+	records := s.feedbackReconciler.Records()
+	batch := make([]db.FeedbackRecord, 0, len(records))
+	for _, record := range records {
+		batch = append(batch, db.FeedbackRecord{RunID: sctx.Run.ID, ItemID: record.Item.ID, ItemJSON: feedback.MarshalItem(record.Item), SourceHead: record.SourceHead, Attempts: record.Attempts, ValidatedHead: record.ValidatedHead, Replied: record.Replied, Repaired: record.Repaired})
 	}
-	return nil
+	return sctx.DB.UpsertFeedbackRecords(batch)
 }
 
 func (s *CIStep) publishValidatedFeedback(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, ciReady bool) (*pipeline.StepOutcome, error) {
@@ -174,22 +174,30 @@ func (s *CIStep) publishValidatedFeedback(sctx *pipeline.StepContext, host scm.H
 				return feedbackGate("feedback repair has no safe synthesized response", action.Item), nil
 			}
 			body = strings.TrimSpace(body) + "\n\n" + scm.FeedbackDispositionMarker(action.Item.ID, sctx.Run.HeadSHA, "fixed")
+			// ValidationPassed binds the item to this exact head in memory. Persist
+			// that idempotency intent before the provider mutation so a crash cannot
+			// lose the fact that this reply was authorized.
+			if persistErr := s.persistFeedback(sctx); persistErr != nil {
+				return feedbackGate("feedback reconciliation ledger write failed before reply", action.Item), nil
+			}
 			if err := ah.ReplyToFeedback(sctx.Ctx, pr, action.Item, body); err != nil {
 				clearCIMonitorReady(sctx)
 				return feedbackGate("validated feedback reply failed; disposition remains blocked", action.Item), nil
 			}
 			resolution, _ := s.feedbackReconciler.Disposition(action.Item.ID, sctx.Run.HeadSHA, true)
-			if resolution.Action == feedback.NoAction && sctx.DB != nil {
-				// A top-level disposition is complete once the provider accepts the
-				// marker. Retire its durable reservation before returning so a
-				// daemon restart cannot replay the reply.
-				if err := sctx.DB.DeleteFeedbackRecord(sctx.Run.ID, action.Item.ID); err != nil {
-					return feedbackGate("feedback reconciliation ledger retirement failed", action.Item), nil
-				}
-			} else if persistErr := s.persistFeedback(sctx); persistErr != nil {
+			// Record the successful external reply before attempting inline
+			// resolution or retiring a top-level item. Recovery can then retry only
+			// the remaining provider operation without duplicating the reply.
+			if persistErr := s.persistFeedback(sctx); persistErr != nil {
 				return feedbackGate("feedback reconciliation ledger write failed", action.Item), nil
 			}
 			if resolution.Action != feedback.Resolve {
+				if sctx.DB != nil {
+					// A top-level disposition is complete once the marker is accepted.
+					if err := sctx.DB.DeleteFeedbackRecord(sctx.Run.ID, action.Item.ID); err != nil {
+						return feedbackGate("feedback reconciliation ledger retirement failed", action.Item), nil
+					}
+				}
 				continue
 			}
 		}

@@ -22,6 +22,36 @@ func (d *DB) UpsertFeedbackRecord(r FeedbackRecord) error {
 	return err
 }
 
+// UpsertFeedbackRecords atomically persists a reconciliation snapshot. A
+// ledger is a reservation for external mutations, so a partially written
+// batch must never be mistaken for a complete snapshot after restart.
+func (d *DB) UpsertFeedbackRecords(records []FeedbackRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	rollback := func() {
+		_ = tx.Rollback()
+	}
+	const query = `INSERT INTO feedback_reconciliation(run_id,item_id,item_json,source_head,attempts,validated_head,replied,repaired,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,item_id) DO UPDATE SET item_json=excluded.item_json,source_head=excluded.source_head,attempts=excluded.attempts,validated_head=excluded.validated_head,replied=excluded.replied,repaired=excluded.repaired,updated_at=excluded.updated_at`
+	for _, r := range records {
+		if r.UpdatedAt == 0 {
+			r.UpdatedAt = time.Now().Unix()
+		}
+		if _, err := tx.Exec(query, r.RunID, r.ItemID, r.ItemJSON, r.SourceHead, r.Attempts, r.ValidatedHead, r.Replied, r.Repaired, r.UpdatedAt); err != nil {
+			rollback()
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (d *DB) GetFeedbackRecords(runID string) ([]FeedbackRecord, error) {
 	rows, err := d.sql.Query(`SELECT run_id,item_id,COALESCE(item_json,''),source_head,attempts,COALESCE(validated_head,''),replied,repaired,updated_at FROM feedback_reconciliation WHERE run_id=? ORDER BY item_id`, runID)
 	if err != nil {
