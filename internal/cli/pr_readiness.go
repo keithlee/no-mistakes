@@ -2,6 +2,9 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -214,16 +217,36 @@ func proofReviewForCurrentHead(prURL, head string) bool {
 		for _, step := range steps {
 			if step.StepName == types.StepProof && step.Status == types.StepStatusCompleted && step.FindingsJSON != nil {
 				findings, parseErr := types.ParseFindingsJSON(*step.FindingsJSON)
-				if parseErr != nil || len(findings.Artifacts) == 0 {
+				if parseErr != nil || strings.TrimSpace(findings.Summary) == "" || len(findings.Tested) == 0 || strings.TrimSpace(findings.TestingSummary) == "" || len(findings.Artifacts) == 0 {
 					return false
 				}
 				proofArtifacts = findings.Artifacts
 			}
 			if step.StepName == types.StepProofReview && step.Status == types.StepStatusCompleted {
+				if step.FindingsJSON == nil {
+					return false
+				}
+				var wire map[string]json.RawMessage
+				if json.Unmarshal([]byte(*step.FindingsJSON), &wire) != nil || strings.TrimSpace(string(wire["summary"])) == "" || wire["findings"] == nil {
+					return false
+				}
 				proofAccepted = true
 			}
 		}
 		if proofAccepted && len(proofArtifacts) > 0 {
+			pathsCfg, pathsErr := paths.New()
+			if pathsErr != nil {
+				return false
+			}
+			worktreeRoot, rootErr := filepath.EvalSymlinks(run.WorktreePath())
+			if rootErr != nil {
+				return false
+			}
+			evidenceRoot := filepath.Join(pathsCfg.EvidenceDir(), run.ID)
+			evidenceRoot, rootErr = filepath.EvalSymlinks(evidenceRoot)
+			if rootErr != nil {
+				return false
+			}
 			for _, artifact := range proofArtifacts {
 				path := strings.TrimSpace(artifact.Path)
 				if path == "" {
@@ -236,8 +259,20 @@ func proofReviewForCurrentHead(prURL, head string) bool {
 					}
 					path = filepath.Join(worktree, filepath.Clean(path))
 				}
+				path, rootErr = filepath.EvalSymlinks(path)
+				if rootErr != nil || (!pathWithinReadiness(path, worktreeRoot) && !pathWithinReadiness(path, evidenceRoot)) {
+					return false
+				}
 				info, statErr := os.Stat(path)
-				if statErr != nil || !info.Mode().IsRegular() || (run.CreatedAt > 0 && info.ModTime().Unix() < run.CreatedAt) {
+				if statErr != nil || !info.Mode().IsRegular() || (run.CreatedAt > 0 && info.ModTime().Unix() < run.CreatedAt) || artifact.Bytes != info.Size() {
+					return false
+				}
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					return false
+				}
+				sum := sha256.Sum256(data)
+				if !strings.EqualFold(strings.TrimSpace(artifact.SHA256), hex.EncodeToString(sum[:])) {
 					return false
 				}
 			}
@@ -245,6 +280,11 @@ func proofReviewForCurrentHead(prURL, head string) bool {
 		}
 	}
 	return false
+}
+
+func pathWithinReadiness(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 func emitReadiness(cmd *cobra.Command, prURL string, phase scm.ReadinessPhase, result scm.ReadinessResult) error {
