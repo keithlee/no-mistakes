@@ -6,7 +6,7 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```text
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → rebase → review → test → proof → proof-review → document → lint → push → pr → ci
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
@@ -207,7 +207,7 @@ A remote branch can move without being rejected when all remote commits are alre
 Any other out-of-band commit stops the push instead of being overwritten.
 Pre-skipping or later skipping Review leaves no approval binding, so Push fails closed unless Push is also skipped.
 
-This step never requires approval - it runs automatically after review, test, document, and lint pass.
+This step never requires approval - it runs automatically after review, test, proof, proof-review, document, and lint pass.
 
 ## PR
 
@@ -256,7 +256,7 @@ The `v1` payload is compact JSON with these required fields:
 - `head_sha`: the exact git commit SHA recorded for the run when no-mistakes writes the PR body
 - `steps`: the ordered pipeline step snapshot; every item has exactly the fields below
 
-- `step`: the raw pipeline step name, such as `intent`, `rebase`, `review`, `test`, `document`, `lint`, `push`, `pr`, or `ci`
+- `step`: the raw pipeline step name, such as `intent`, `rebase`, `review`, `test`, `proof`, `proof-review`, `document`, `lint`, `push`, `pr`, or `ci`
 - `status`: the raw [step status](#step-statuses) recorded for that step, such as `completed`, `skipped`, or `failed`
 
 Items are ordered by the fixed pipeline order and represent the exact database snapshot when no-mistakes creates or updates the PR body. The attestation includes `pr` and `ci` records even though their human-readable details are not shown in `## Pipeline`; at the normal PR write point those records are commonly `running` and `pending`. The `head_sha` binds that snapshot to the commit it describes, so consumers can detect when a later push has made the comment stale. It is not refreshed after the PR step unless no-mistakes writes the body again.

@@ -19,7 +19,7 @@ flowchart TD
   admission --> daemon["Daemon"]
   hook --> daemon
   daemon --> worktree["Disposable worktree"]
-  worktree --> pipeline["intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci"]
+  worktree --> pipeline["intent -> rebase -> review -> test -> proof -> proof-review -> document -> lint -> push -> pr -> ci"]
   pipeline --> target["Push target"]
   daemon --> db["SQLite state"]
   daemon --> ipc["IPC socket"]
